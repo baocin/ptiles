@@ -1,0 +1,310 @@
+# US.ptiles Schema v7
+
+Multi-layer timeline spatial data format. Extends v6's single-layer building format
+to seven independent layers: buildings, roads, places, admin, water, rail, parks.
+
+## Key Changes from v6
+
+- Magic: `PTILEST\x00` (T = timeline, was F = footprints in v6)
+- Version: 7
+- Multi-layer: each layer has its own spatial index and data blocks
+- New layer-specific record formats for non-building features
+- Layer directory maps layer types to their index/block regions
+
+## Compression
+
+Same techniques as v6:
+- Zstd dictionary compression (level 22): Shared dictionary across all layers
+- Delta coordinate encoding: Zigzag + varint for vertex deltas
+- Delta OSM ID encoding: Sequential IDs within H3 cells
+- H3 spatial clustering: Features grouped by geographic cell
+- Indexed type codes: Common types as 1-byte indices
+
+## File Structure
+
+```
++---------------------------------------------------------------+
+| Header (256 bytes)                                             |
++---------------------------------------------------------------+
+| Zstd Dictionary (variable, typically 512 KB)                  |
++---------------------------------------------------------------+
+| Layer Directory (variable)                                     |
++---------------------------------------------------------------+
+| Spatial Index: Buildings                                       |
++---------------------------------------------------------------+
+| Data Blocks: Buildings                                         |
++---------------------------------------------------------------+
+| Spatial Index: Roads                                           |
++---------------------------------------------------------------+
+| Data Blocks: Roads                                             |
++---------------------------------------------------------------+
+| ... (one index + blocks per layer)                             |
++---------------------------------------------------------------+
+```
+
+## Header (256 bytes)
+
+| Offset | Size | Type   | Field            | Description                    |
+|--------|------|--------|------------------|--------------------------------|
+| 0      | 8    | bytes  | magic            | `PTILEST\x00` (T = timeline)   |
+| 8      | 1    | uint8  | version          | 7                              |
+| 9      | 1    | uint8  | layer_count      | Number of layers present       |
+| 10     | 6    | -      | reserved         | Padding                        |
+| 16     | 4    | float  | min_lat          | Bounding box south             |
+| 20     | 4    | float  | min_lon          | Bounding box west              |
+| 24     | 4    | float  | max_lat          | Bounding box north             |
+| 28     | 4    | float  | max_lon          | Bounding box east              |
+| 32     | 8    | uint64 | total_poi_count  | Total features across layers   |
+| 40     | 8    | uint64 | dict_offset      | Byte offset to dictionary      |
+| 48     | 4    | uint32 | dict_length      | Dictionary size in bytes       |
+| 52     | 8    | uint64 | layer_dir_offset | Byte offset to layer directory |
+| 60     | 4    | uint32 | layer_dir_length | Layer directory size in bytes  |
+| 64     | 192  | -      | reserved         | Future use (zeroed)            |
+
+Byte order: Little-endian throughout.
+
+## Layer Directory
+
+| Offset | Size   | Type   | Field        | Description                 |
+|--------|--------|--------|--------------|-----------------------------|
+| 0      | 1      | uint8  | layer_count  | Number of layers            |
+| 1      | 3      | -      | reserved     | Padding                     |
+| 4+     | varies | -      | entries[]    | One entry per layer         |
+
+Each entry:
+| Offset | Size   | Type        | Field         | Description                  |
+|--------|--------|-------------|---------------|------------------------------|
+| 0      | 1      | uint8       | layer_type    | Layer enum (see below)       |
+| 1      | 1      | uint8       | name_len      | Length of layer name         |
+| 2      | varies | UTF-8       | name          | Layer name string            |
+| -      | 8      | uint64      | index_offset  | Byte offset to spatial index |
+| -      | 4      | uint32      | index_length  | Index size in bytes          |
+| -      | 8      | uint64      | blocks_offset | Byte offset to first block   |
+| -      | 8      | uint64      | poi_count     | Features in this layer       |
+
+## Layer Types
+
+| Index | Layer     | Geometry    | Description              |
+|-------|-----------|-------------|--------------------------|
+| 0     | buildings | Polygon     | Building footprints      |
+| 1     | roads     | LineString  | Road centerlines         |
+| 2     | places    | Point       | Cities, towns, villages  |
+| 3     | admin     | Polygon     | Administrative boundaries |
+| 4     | water     | Polygon     | Lakes, rivers, reservoirs|
+| 5     | rail      | LineString  | Railway tracks           |
+| 6     | parks     | Polygon     | Parks, gardens, reserves |
+| 7-255 | reserved  | -           | Future use               |
+
+## Spatial Index
+
+Same format as v6 but per-layer. H3 resolution 7 cells sorted by H3 cell ID.
+
+| Field        | Size | Type   | Description                    |
+|--------------|------|--------|--------------------------------|
+| entry_count  | 4    | uint32 | Number of index entries        |
+| For each:    |      |        |                                |
+| h3_cell      | 8    | uint64 | H3 index as integer            |
+| block_offset | 6    | bytes  | Absolute byte offset to block  |
+| block_length | 3    | bytes  | Compressed block size          |
+| poi_count    | 2    | uint16 | Features in this cell          |
+
+Entry size: 19 bytes (8 + 6 + 3 + 2).
+
+## Layer Record Formats
+
+### Buildings (layer 0)
+
+Same binary format as v6. Polygons with building type, name, and optional metadata.
+
+| Field       | Encoding          | Description                        |
+|-------------|-------------------|------------------------------------|
+| osm_id      | varint (delta)    | Delta from previous OSM ID         |
+| vertex_count| uint8             | Polygon vertex count (max 255)     |
+| first_lon   | int32             | First longitude in microdegrees    |
+| first_lat   | int32             | First latitude in microdegrees     |
+| deltas      | varint zigzag x2  | Vertex deltas (lon, lat per pair)  |
+| flags       | uint8             | Bit flags for optional fields      |
+| btype_idx   | uint8             | Building type index (0-19, 255)    |
+| [btype_str] | uint8 + UTF-8     | Custom type if btype_idx == 255    |
+| [name]      | uint16 + UTF-8    | Flag 0x01                          |
+| [category]  | uint8 + UTF-8     | Flag 0x02                          |
+| [name_src]  | uint8 + UTF-8     | Flag 0x04                          |
+| [poi_osm_id]| uint64            | Flag 0x08                          |
+| [height]    | uint8             | Flag 0x10 (0.5m steps)             |
+
+### Roads (layer 1)
+
+LineString geometry with highway classification.
+
+| Field       | Encoding          | Description                        |
+|-------------|-------------------|------------------------------------|
+| osm_id      | varint (delta)    | Delta from previous OSM ID         |
+| vertex_count| uint8             | Line vertices (max 255)            |
+| first_lon   | int32             | First longitude in microdegrees    |
+| first_lat   | int32             | First latitude in microdegrees     |
+| deltas      | varint zigzag x2  | Vertex deltas                      |
+| flags       | uint8             | Optional fields                    |
+| rtype_idx   | uint8             | Road type index (0-23, 255)        |
+| [rtype_str] | uint8 + UTF-8     | Custom type if rtype_idx == 255    |
+| [name]      | uint16 + UTF-8    | Flag 0x01                          |
+| [maxspeed]  | uint8             | Flag 0x02 (mph)                    |
+| [layer_z]   | int8              | Flag 0x04 (bridge/tunnel level)    |
+
+Road type index: motorway=0, trunk=1, primary=2, secondary=3, tertiary=4,
+unclassified=5, residential=6, motorway_link=7, trunk_link=8, primary_link=9,
+secondary_link=10, tertiary_link=11, living_street=12, service=13, pedestrian=14,
+track=15, bus_guideway=16, escape=17, raceway=18, road=19, footway=20,
+bridleway=21, steps=22, path=23.
+
+### Places (layer 2)
+
+Point geometry for populated places.
+
+| Field       | Encoding          | Description                        |
+|-------------|-------------------|------------------------------------|
+| osm_id      | varint (delta)    | Delta from previous OSM ID         |
+| lon         | int32             | Longitude in microdegrees          |
+| lat         | int32             | Latitude in microdegrees           |
+| flags       | uint8             | Optional fields                    |
+| ptype_idx   | uint8             | Place type index (0-13, 255)       |
+| [ptype_str] | uint8 + UTF-8     | Custom type if ptype_idx == 255    |
+| name        | uint16 + UTF-8    | Always present                     |
+| [population]| varint            | Flag 0x01                          |
+
+Place type index: city=0, town=1, village=2, hamlet=3, suburb=4, quarter=5,
+neighbourhood=6, isolated_dwelling=7, farm=8, county=9, state=10, country=11,
+continent=12, locality=13.
+
+### Admin (layer 3)
+
+Polygon geometry for administrative boundaries.
+
+| Field       | Encoding          | Description                        |
+|-------------|-------------------|------------------------------------|
+| osm_id      | varint (delta)    | Delta from previous OSM ID         |
+| admin_level | uint8             | OSM admin_level (2-10)             |
+| vertex_count| uint8             | Polygon vertices                   |
+| first_lon   | int32             | First longitude in microdegrees    |
+| first_lat   | int32             | First latitude in microdegrees     |
+| deltas      | varint zigzag x2  | Vertex deltas                      |
+| flags       | uint8             | Optional fields                    |
+| name        | uint16 + UTF-8    | Always present                     |
+| [iso_code]  | uint8 + UTF-8     | Flag 0x01                          |
+
+### Water (layer 4)
+
+Polygon geometry for water bodies.
+
+| Field       | Encoding          | Description                        |
+|-------------|-------------------|------------------------------------|
+| osm_id      | varint (delta)    | Delta from previous OSM ID         |
+| vertex_count| uint8             | Polygon vertices                   |
+| first_lon   | int32             | First longitude in microdegrees    |
+| first_lat   | int32             | First latitude in microdegrees     |
+| deltas      | varint zigzag x2  | Vertex deltas                      |
+| flags       | uint8             | Optional fields                    |
+| wtype_idx   | uint8             | Water type index (0-11, 255)       |
+| [wtype_str] | uint8 + UTF-8     | Custom type if wtype_idx == 255    |
+| [name]      | uint16 + UTF-8    | Flag 0x01                          |
+
+Water type index: lake=0, reservoir=1, river=2, stream=3, canal=4, pond=5,
+basin=6, lagoon=7, oxbow=8, riverbank=9, wetland=10, bay=11.
+
+### Rail (layer 5)
+
+LineString geometry for railway tracks.
+
+| Field       | Encoding          | Description                        |
+|-------------|-------------------|------------------------------------|
+| osm_id      | varint (delta)    | Delta from previous OSM ID         |
+| vertex_count| uint8             | Line vertices                      |
+| first_lon   | int32             | First longitude in microdegrees    |
+| first_lat   | int32             | First latitude in microdegrees     |
+| deltas      | varint zigzag x2  | Vertex deltas                      |
+| flags       | uint8             | Optional fields                    |
+| rtype_idx   | uint8             | Rail type index (0-10, 255)        |
+| [rtype_str] | uint8 + UTF-8     | Custom type if rtype_idx == 255    |
+| [name]      | uint16 + UTF-8    | Flag 0x01                          |
+
+Rail type index: rail=0, light_rail=1, subway=2, tram=3, monorail=4,
+narrow_gauge=5, funicular=6, disused=7, abandoned=8, preserved=9, miniature=10.
+
+### Parks (layer 6)
+
+Polygon geometry for parks, gardens, and natural areas.
+
+| Field       | Encoding          | Description                        |
+|-------------|-------------------|------------------------------------|
+| osm_id      | varint (delta)    | Delta from previous OSM ID         |
+| vertex_count| uint8             | Polygon vertices                   |
+| first_lon   | int32             | First longitude in microdegrees    |
+| first_lat   | int32             | First latitude in microdegrees     |
+| deltas      | varint zigzag x2  | Vertex deltas                      |
+| flags       | uint8             | Optional fields                    |
+| ptype_idx   | uint8             | Park type index (0-13, 255)        |
+| [ptype_str] | uint8 + UTF-8     | Custom type if ptype_idx == 255    |
+| [name]      | uint16 + UTF-8    | Flag 0x01                          |
+
+Park type index: park=0, garden=1, nature_reserve=2, national_park=3,
+recreation_ground=4, playground=5, pitch=6, sports_centre=7, cemetery=8,
+common=9, forest=10, grass=11, meadow=12, wood=13.
+
+## Shared Binary Encoding
+
+### Varint
+
+Protobuf-style unsigned varint: 7 bits per byte, MSB indicates continuation.
+
+### Zigzag
+
+Maps signed integers to unsigned for efficient varint encoding:
+  zigzag(n) = (n << 1) ^ (n >> 63)
+
+### Delta coordinates
+
+Each subsequent vertex encoded as:
+  delta_lon = zigzag(current_lon - previous_lon)
+  delta_lat = zigzag(current_lat - previous_lat)
+
+## Data Block Format
+
+Each block is zstd compressed (level 22) with shared dictionary.
+
+Decompressed format:
+```
++-----------------------------+
+| record_length (4 bytes)     |
+| record_data (variable)      |
++-----------------------------+
+| record_length (4 bytes)     |
+| record_data (variable)      |
++-----------------------------+
+| ...                         |
++-----------------------------+
+```
+
+Records within a block are sorted by OSM ID for delta encoding efficiency.
+
+## Version History
+
+| Version | Changes                                                    |
+|---------|------------------------------------------------------------|
+| **7**   | **Multi-layer: 7 layer types with per-layer indexes**      |
+| 6       | Buildings only: delta OSM IDs + zigzag varint coords       |
+| 5       | Buildings only: varint coords, full OSM IDs                |
+| 4       | Buildings only: binary footprints, fixed-size coords       |
+| 3       | Buildings only: JSON minimal format (gzip)                 |
+
+## Reference Implementation
+
+| Language | File    | Notes                     |
+|----------|---------|---------------------------|
+| Rust     | ptiles-v7/ | Reader library (this crate) |
+
+## Dependencies
+
+- Rust 2021 edition
+- `byteorder` (little-endian binary I/O)
+- `zstd` (zstd decompression with dictionary)
+- `integer-encoding` (varint utilities)
+- `h3o` (H3 spatial indexing bindings)

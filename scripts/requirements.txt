@@ -1,0 +1,7 @@
+# Python dependencies for PTiles build pipeline
+# Install with: pip install -r scripts/requirements.txt
+h3>=4.0
+zstandard>=0.22
+shapely>=2.0
+pmtiles>=0.1
+requests>=2.31

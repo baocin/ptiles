@@ -1,0 +1,161 @@
+name: Build .ptiles
+
+on:
+  workflow_dispatch:
+    inputs:
+      pmtiles_url:
+        description: "URL to source PMTiles extract"
+        required: false
+        type: string
+        default: ""
+      layers:
+        description: "Layers to build (comma-separated: buildings,roads,places,admin,water,rail,parks)"
+        required: false
+        type: string
+        default: "buildings,roads,places"
+      release_tag:
+        description: "Tag for GitHub Release (leave empty to skip release)"
+        required: false
+        type: string
+        default: ""
+
+  schedule:
+    # Weekly on Sunday at 06:00 UTC
+    - cron: "0 6 * * 0"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Layers to build by default (scheduled runs use all layers)
+  DEFAULT_LAYERS: "buildings,roads,places,admin,water,rail,parks"
+  # Default PMTiles source (Protomaps US extract -- override via workflow_dispatch)
+  DEFAULT_PMTILES_URL: "https://build.protomaps.com/20250414.pmtiles"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 480  # 8 hours -- PMTiles extract is ~130GB
+
+    steps:
+      # -------------------------------------------------------------------
+      # Stage 1: Checkout
+      # -------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      # -------------------------------------------------------------------
+      # Stage 2: Rust toolchain
+      # -------------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ptiles-v7
+
+      - name: Build ptiles-v7 crate
+        run: cargo build --release
+        working-directory: ptiles-v7
+
+      - name: Run Rust tests
+        run: cargo test --release
+        working-directory: ptiles-v7
+
+      # -------------------------------------------------------------------
+      # Stage 3: Python environment
+      # -------------------------------------------------------------------
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('scripts/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install h3 zstandard shapely pmtiles requests
+
+      # -------------------------------------------------------------------
+      # Stage 4: Download PMTiles source data
+      # -------------------------------------------------------------------
+      - name: Download PMTiles extract
+        run: |
+          PMTILES_URL="${{ github.event.inputs.pmtiles_url || env.DEFAULT_PMTILES_URL }}"
+          echo "Downloading PMTiles from: $PMTILES_URL"
+          mkdir -p data
+          curl -L --retry 3 --retry-delay 30 -o data/source.pmtiles "$PMTILES_URL"
+          ls -lh data/source.pmtiles
+        timeout-minutes: 240
+
+      # -------------------------------------------------------------------
+      # Stage 5: Build .ptiles files
+      # -------------------------------------------------------------------
+      - name: Build .ptiles layers
+        run: |
+          LAYERS="${{ github.event.inputs.layers || env.DEFAULT_LAYERS }}"
+          echo "Building layers: $LAYERS"
+          mkdir -p output
+
+          IFS=',' read -ra LAYER_ARRAY <<< "$LAYERS"
+          for layer in "${LAYER_ARRAY[@]}"; do
+            layer=$(echo "$layer" | xargs)  # trim whitespace
+            echo ""
+            echo "=== Building US.${layer}.ptiles ==="
+            python scripts/build_ptiles_footprints.py \
+              --input data/source.pmtiles \
+              --layer "$layer" \
+              --output "output/US.${layer}.ptiles" \
+              --schema v7
+          done
+
+          echo ""
+          echo "=== Build complete ==="
+          ls -lh output/
+        timeout-minutes: 180
+
+      # -------------------------------------------------------------------
+      # Stage 6: Upload build artifacts
+      # -------------------------------------------------------------------
+      - name: Upload .ptiles artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptiles-output
+          path: output/*.ptiles
+          retention-days: 90
+          compression-level: 0  # already zstd compressed
+
+      # -------------------------------------------------------------------
+      # Stage 7: GitHub Release (optional, workflow_dispatch only)
+      # -------------------------------------------------------------------
+      - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: "PTiles ${{ github.event.inputs.release_tag }}"
+          body: |
+            PTiles build from PMTiles extract.
+
+            **Source URL**: ${{ github.event.inputs.pmtiles_url || env.DEFAULT_PMTILES_URL }}
+            **Layers built**: ${{ github.event.inputs.layers || env.DEFAULT_LAYERS }}
+            **Schema version**: v7
+            **Build run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ### Included files
+            $(ls -lh output/ | awk '{print "- "$NF" ("$5")"}')
+          files: output/*.ptiles
+          draft: false
+          prerelease: false

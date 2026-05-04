@@ -2,14 +2,12 @@
 name = "ptiles-v7"
 version = "7.0.0"
 edition = "2021"
-description = "PTiles v7 binary reader: multi-layer timeline spatial data format"
+description = "PTiles v7 multi-layer geospatial binary format reader"
 license = "MIT"
 repository = "http://localhost:3001/kino/ptiles"
 
 [dependencies]
 byteorder = "1.5"
-zstd = { version = "0.13", features = ["zstdmt"] }
-integer-encoding = "4"
+thiserror = "2"
+zstd = "0.13"
 h3o = "0.7"
-
-[dev-dependencies]

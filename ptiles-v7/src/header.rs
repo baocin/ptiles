@@ -1,130 +1,212 @@
-/// PTiles v7 Header (256 bytes)
-///
-/// Magic: "PTILEST\x00" (T = timeline)
-/// Version: 7
-///
-/// Layout:
-///   Offset | Size | Type   | Field
-///   -------|------|--------|-------
-///   0      | 8    | bytes  | magic ("PTILEST\x00")
-///   8      | 1    | uint8  | version (7)
-///   9      | 1    | uint8  | layer_count
-///   10     | 6    | -      | reserved
-///   16     | 4    | float  | min_lat
-///   20     | 4    | float  | min_lon
-///   24     | 4    | float  | max_lat
-///   28     | 4    | float  | max_lon
-///   32     | 8    | uint64 | total_poi_count
-///   40     | 8    | uint64 | dict_offset
-///   48     | 4    | uint32 | dict_length
-///   52     | 8    | uint64 | layer_dir_offset
-///   60     | 4    | uint32 | layer_dir_length
-///   64     | 192  | -      | reserved (future use)
+//! PTiles v7 file header (512 bytes).
+//!
+//! The header identifies the file format, version, bounding box, and
+//! byte offsets to the dictionary, layer directory, spatial index, and data blocks.
 
-use std::io::{Read, Seek, SeekFrom};
-use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt};
+use std::io::{self, Read};
+use thiserror::Error;
 
-pub const HEADER_SIZE: usize = 256;
-pub const MAGIC: &[u8; 8] = b"PTILEST\x00";
+/// Magic bytes for PTiles v7 files: "PTILES7\0"
+pub const MAGIC: &[u8; 8] = b"PTILES7\x00";
+
+/// Current version number.
 pub const VERSION: u8 = 7;
 
+/// Header size in bytes.
+pub const HEADER_SIZE: usize = 512;
+
+/// Error type for header parsing.
+#[derive(Error, Debug)]
+pub enum HeaderError {
+    #[error("invalid magic bytes: expected 'PTILES7\\0', got {0:?}")]
+    InvalidMagic([u8; 8]),
+
+    #[error("unsupported version: {0} (expected {VERSION})")]
+    UnsupportedVersion(u8),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+}
+
+/// PTiles v7 file header.
 #[derive(Debug, Clone)]
 pub struct Header {
+    /// File version (must be 7).
     pub version: u8,
-    pub layer_count: u8,
+
+    /// Minimum latitude (southern bound).
     pub min_lat: f32,
+
+    /// Minimum longitude (western bound).
     pub min_lon: f32,
+
+    /// Maximum latitude (northern bound).
     pub max_lat: f32,
+
+    /// Maximum longitude (eastern bound).
     pub max_lon: f32,
+
+    /// Number of layers in the file.
+    pub layer_count: u8,
+
+    /// Total feature count across all layers.
     pub total_poi_count: u64,
+
+    /// Byte offset to the zstd dictionary.
     pub dict_offset: u64,
+
+    /// Dictionary size in bytes.
     pub dict_length: u32,
+
+    /// Byte offset to the layer directory.
     pub layer_dir_offset: u64,
+
+    /// Layer directory size in bytes.
     pub layer_dir_length: u32,
+
+    /// Byte offset to the spatial index.
+    pub index_offset: u64,
+
+    /// Spatial index size in bytes.
+    pub index_length: u32,
+
+    /// Byte offset to the first data block.
+    pub blocks_offset: u64,
 }
 
 impl Header {
-    /// Read and validate the v7 header from a reader.
-    pub fn read<R: Read + Seek>(reader: &mut R) -> std::io::Result<Self> {
-        reader.seek(SeekFrom::Start(0))?;
-
-        // Magic
+    /// Parse a header from a reader.
+    ///
+    /// Reads exactly 512 bytes from the current position.
+    pub fn read<R: Read>(reader: &mut R) -> Result<Self, HeaderError> {
         let mut magic = [0u8; 8];
         reader.read_exact(&mut magic)?;
+
         if &magic != MAGIC {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Invalid magic: expected {:?}, got {:?}",
-                    std::str::from_utf8(MAGIC).unwrap_or("??"),
-                    std::str::from_utf8(&magic).unwrap_or("??")
-                ),
-            ));
+            return Err(HeaderError::InvalidMagic(magic));
         }
 
-        // Version
         let version = reader.read_u8()?;
         if version != VERSION {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Unsupported version: {version}, expected {VERSION}"),
-            ));
+            return Err(HeaderError::UnsupportedVersion(version));
         }
 
-        let layer_count = reader.read_u8()?;
-
-        // Reserved (6 bytes)
-        let mut reserved = [0u8; 6];
+        // Skip 3 reserved bytes
+        let mut reserved = [0u8; 3];
         reader.read_exact(&mut reserved)?;
 
-        // Bounding box
         let min_lat = reader.read_f32::<LittleEndian>()?;
         let min_lon = reader.read_f32::<LittleEndian>()?;
         let max_lat = reader.read_f32::<LittleEndian>()?;
         let max_lon = reader.read_f32::<LittleEndian>()?;
 
-        // Counts and offsets
+        let layer_count = reader.read_u8()?;
+
+        // Skip 3 reserved bytes
+        let mut reserved2 = [0u8; 3];
+        reader.read_exact(&mut reserved2)?;
+
         let total_poi_count = reader.read_u64::<LittleEndian>()?;
         let dict_offset = reader.read_u64::<LittleEndian>()?;
         let dict_length = reader.read_u32::<LittleEndian>()?;
         let layer_dir_offset = reader.read_u64::<LittleEndian>()?;
         let layer_dir_length = reader.read_u32::<LittleEndian>()?;
+        let index_offset = reader.read_u64::<LittleEndian>()?;
+        let index_length = reader.read_u32::<LittleEndian>()?;
+        let blocks_offset = reader.read_u64::<LittleEndian>()?;
 
-        // Skip remaining reserved bytes
-        reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+        // Skip remaining reserved bytes (428 bytes of padding to reach 512)
+        // We've read: 8+1+3 + 4*4 + 1+3 + 8 + 8+4 + 8+4 + 8+4 + 8 = 84 bytes so far
+        // 512 - 84 = 428 bytes remaining
+        let mut reserved_tail = vec![0u8; HEADER_SIZE - 84];
+        reader.read_exact(&mut reserved_tail)?;
 
         Ok(Header {
             version,
-            layer_count,
             min_lat,
             min_lon,
             max_lat,
             max_lon,
+            layer_count,
             total_poi_count,
             dict_offset,
             dict_length,
             layer_dir_offset,
             layer_dir_length,
+            index_offset,
+            index_length,
+            blocks_offset,
         })
     }
 
-    /// Serialize header to bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// Check if the given coordinates fall within the file's bounding box.
+    pub fn contains_point(&self, lat: f32, lon: f32) -> bool {
+        lat >= self.min_lat && lat <= self.max_lat && lon >= self.min_lon && lon <= self.max_lon
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_read_header() {
         let mut buf = vec![0u8; HEADER_SIZE];
         buf[0..8].copy_from_slice(MAGIC);
         buf[8] = VERSION;
-        buf[9] = self.layer_count;
-        // bytes 10-15 are reserved (already zeroed)
-        LittleEndian::write_f32(&mut buf[16..20], self.min_lat);
-        LittleEndian::write_f32(&mut buf[20..24], self.min_lon);
-        LittleEndian::write_f32(&mut buf[24..28], self.max_lat);
-        LittleEndian::write_f32(&mut buf[28..32], self.max_lon);
-        LittleEndian::write_u64(&mut buf[32..40], self.total_poi_count);
-        LittleEndian::write_u64(&mut buf[40..48], self.dict_offset);
-        LittleEndian::write_u32(&mut buf[48..52], self.dict_length);
-        LittleEndian::write_u64(&mut buf[52..60], self.layer_dir_offset);
-        LittleEndian::write_u32(&mut buf[60..64], self.layer_dir_length);
-        // bytes 64..256 are reserved
-        buf
+        // min_lat = 25.0, min_lon = -125.0, max_lat = 50.0, max_lon = -65.0
+        buf[12..16].copy_from_slice(&25.0f32.to_le_bytes());
+        buf[16..20].copy_from_slice(&(-125.0f32).to_le_bytes());
+        buf[20..24].copy_from_slice(&50.0f32.to_le_bytes());
+        buf[24..28].copy_from_slice(&(-65.0f32).to_le_bytes());
+        buf[28] = 7; // layer_count
+                       // total_poi_count
+        buf[32..40].copy_from_slice(&100_000_000u64.to_le_bytes());
+        // dict_offset @ 512
+        buf[40..48].copy_from_slice(&512u64.to_le_bytes());
+        // dict_length = 524288
+        buf[48..52].copy_from_slice(&524288u32.to_le_bytes());
+        // layer_dir_offset @ 524800
+        buf[52..60].copy_from_slice(&524800u64.to_le_bytes());
+        // layer_dir_length = 224
+        buf[60..64].copy_from_slice(&224u32.to_le_bytes());
+        // index_offset @ 525024
+        buf[64..72].copy_from_slice(&525024u64.to_le_bytes());
+        // index_length = 1000000
+        buf[72..76].copy_from_slice(&1000000u32.to_le_bytes());
+        // blocks_offset @ 1525024
+        buf[76..84].copy_from_slice(&1525024u64.to_le_bytes());
+
+        let mut cursor = Cursor::new(&buf);
+        let header = Header::read(&mut cursor).unwrap();
+
+        assert_eq!(header.version, 7);
+        assert_eq!(header.min_lat, 25.0);
+        assert_eq!(header.max_lat, 50.0);
+        assert_eq!(header.layer_count, 7);
+        assert_eq!(header.total_poi_count, 100_000_000);
+        assert!(header.contains_point(40.0, -100.0));
+        assert!(!header.contains_point(60.0, -100.0));
+    }
+
+    #[test]
+    fn test_bad_magic() {
+        let mut buf = vec![0u8; HEADER_SIZE];
+        buf[0..8].copy_from_slice(b"BADMAGIC");
+        let mut cursor = Cursor::new(&buf);
+        let err = Header::read(&mut cursor).unwrap_err();
+        assert!(matches!(err, HeaderError::InvalidMagic(_)));
+    }
+
+    #[test]
+    fn test_bad_version() {
+        let mut buf = vec![0u8; HEADER_SIZE];
+        buf[0..8].copy_from_slice(MAGIC);
+        buf[8] = 99;
+        let mut cursor = Cursor::new(&buf);
+        let err = Header::read(&mut cursor).unwrap_err();
+        assert!(matches!(err, HeaderError::UnsupportedVersion(99)));
     }
 }

@@ -1,12 +1,98 @@
-# US.ptiles Schema v6
+# PTiles
+
+Multi-layer geospatial binary format for offline map data. Compresses OpenStreetMap features into compact, queryable files using H3 spatial indexing and zstd dictionary compression.
+
+## v7: Multi-Layer Format
+
+PTiles v7 extends the v6 building-footprint format into a 7-layer container covering the full OSM feature surface:
+
+| Layer | Geometry   | Description                  |
+|-------|------------|------------------------------|
+| 0     | Polygon    | Building footprints (v6 compat) |
+| 1     | Linestring | Road network                 |
+| 2     | Point      | Places (cities, towns, POIs) |
+| 3     | Polygon    | Administrative boundaries    |
+| 4     | Polygon    | Water bodies                 |
+| 5     | Linestring | Railway network              |
+| 6     | Polygon    | Parks, forests, protected areas |
+
+Each layer uses per-type indexed lookups (20 building types, 15 road classes, 15 place types, 13 water types, 13 rail types, 15 leisure types) and delta-encoded coordinates for maximum compression.
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/SCHEMA-v7.md](docs/SCHEMA-v7.md) | Full v7 binary format specification (header, layer directory, spatial index, per-layer record formats) |
+| [docs/BUILDING.md](docs/BUILDING.md) | How to build .ptiles files from PMTiles source data |
+| [docs/REPO-STRUCTURE.md](docs/REPO-STRUCTURE.md) | Repository layout, remotes, and sync workflow |
+| [docs/CI.md](docs/CI.md) | CI pipeline stages, triggers, and release process |
+
+## Quickstart
+
+### Build the Rust crate
+
+```bash
+cd ptiles-v7
+cargo build --release
+cargo test --release
+```
+
+### Query a .ptiles v7 file
+
+```rust
+use ptiles_v7::{PtilesReader, LayerType};
+
+let mut reader = PtilesReader::open("US.buildings.ptiles")?;
+let header = reader.header();
+println!("Layers: {}, Features: {}", header.layer_count, header.total_poi_count);
+
+// Query buildings in a specific H3 cell
+let features = reader.query_cell(LayerType::Buildings, 0x0870c00051ffffff)?;
+println!("Found {} buildings", features.len());
+```
+
+### Build .ptiles from PMTiles
+
+```bash
+pip install h3 zstandard shapely pmtiles requests
+python scripts/build_ptiles_footprints.py \
+  --input data/source.pmtiles \
+  --layer buildings \
+  --output output/US.buildings.ptiles \
+  --schema v7
+```
+
+## Repository
+
+- **Gitea**: http://localhost:3001/kino/ptiles
+- **Upstream**: https://github.com/baocin/ptiles
+- **CI**: `.github/workflows/build-ptiles.yml` (7-stage pipeline, manual + weekly cron)
+
+## Rust Crate
+
+```toml
+[dependencies]
+ptiles-v7 = { git = "http://localhost:3001/kino/ptiles", tag = "v7.0.0" }
+```
+
+Or use path dependency from a local clone:
+
+```toml
+[dependencies]
+ptiles-v7 = { path = "ptiles-v7" }
+```
+
+---
+
+# v6 Schema (Legacy)
+
+*Every building in the United States -- 77 million footprints with business names and details extracted from OpenStreetMap. The source data comes from [Protomaps PMTiles](https://protomaps.com/), which is derived from OSM's global building dataset.*
 
 ## Demo
 
 [![Watch the demo](https://img.youtube.com/vi/wG7tEsdkaCs/maxresdefault.jpg)](https://youtu.be/wG7tEsdkaCs)
 
-*Every building in the United States—77 million footprints with business names and details extracted from OpenStreetMap. The source data comes from [Protomaps PMTiles](https://protomaps.com/), which is derived from OSM's global building dataset.*
-
-Binary format for offline GPS → building lookup with full polygon footprints.
+Binary format for offline GPS to building lookup with full polygon footprints.
 
 ## Compression Achievement
 
@@ -35,416 +121,16 @@ File size: ~1.14 GB (~15 bytes/building average).
 | Dictionary size      | 512 KB         |
 | Coordinate precision | 1.1m (10 microdegrees) |
 
-## File Structure
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Header (256 bytes)                                              │
-├─────────────────────────────────────────────────────────────────┤
-│ Zstd Dictionary (512 KB typical)                                │
-├─────────────────────────────────────────────────────────────────┤
-│ Spatial Index (H3 cell → block offset/length)                   │
-├─────────────────────────────────────────────────────────────────┤
-│ Data Blocks (zstd compressed, one per H3 cell)                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-## Header (256 bytes)
-
-| Offset | Size | Type   | Field         | Description                        |
-|--------|------|--------|---------------|------------------------------------|
-| 0      | 8    | bytes  | magic         | `PTILESF\x00` (F = footprints)     |
-| 8      | 1    | uint8  | version       | 6                                  |
-| 9      | 3    | -      | reserved      | Padding for alignment              |
-| 12     | 4    | float  | min_lat       | Bounding box south                 |
-| 16     | 4    | float  | min_lon       | Bounding box west                  |
-| 20     | 4    | float  | max_lat       | Bounding box north                 |
-| 24     | 4    | float  | max_lon       | Bounding box east                  |
-| 28     | 8    | uint64 | poi_count     | Total building count               |
-| 36     | 4    | uint32 | block_count   | Number of H3 cell blocks           |
-| 40     | 8    | uint64 | dict_offset   | Byte offset to dictionary          |
-| 48     | 4    | uint32 | dict_length   | Dictionary size in bytes           |
-| 52     | 8    | uint64 | index_offset  | Byte offset to spatial index       |
-| 60     | 4    | uint32 | index_length  | Index size in bytes                |
-| 64     | 8    | uint64 | blocks_offset | Byte offset to first data block    |
-| 72     | 184  | -      | reserved      | Future use (zeroed)                |
-
-**Byte order:** Little-endian throughout.
-
-## Spatial Index
-
-H3 resolution 7 cells (~5.16 km² average). Sorted by H3 cell ID for binary search.
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│ entry_count (4 bytes, uint32)                                │
-├──────────────────────────────────────────────────────────────┤
-│ Entry 0                                                      │
-│   h3_cell (8 bytes, uint64) - H3 index as integer            │
-│   block_offset (6 bytes) - Absolute byte offset to block     │
-│   block_length (3 bytes) - Compressed block size             │
-│   poi_count (2 bytes, uint16) - Buildings in this cell       │
-├──────────────────────────────────────────────────────────────┤
-│ Entry 1...N (19 bytes each)                                  │
-└──────────────────────────────────────────────────────────────┘
-```
-
-Entry size: 19 bytes (8 + 6 + 3 + 2)
-
-**Why 6-byte offset:** Supports files up to 281 TB (2^48 bytes). 4 bytes would limit to 4 GB.
-
-**Why 3-byte length:** Max compressed block size 16 MB (2^24 bytes). Typical blocks are 2-50 KB.
-
-### Binary Search Implementation
-
-```python
-def find_block_for_cell(index: list[dict], cell: str) -> dict | None:
-    cell_int = int(cell, 16)
-    left, right = 0, len(index) - 1
-    while left <= right:
-        mid = (left + right) // 2
-        entry_int = int(index[mid]["h3_cell"], 16)
-        if entry_int == cell_int:
-            return index[mid]
-        elif entry_int < cell_int:
-            left = mid + 1
-        else:
-            right = mid - 1
-    return None
-```
-
-## Data Block
-
-Each block is zstd compressed (level 22) with shared dictionary.
-Contains all buildings whose centroid falls within the H3 cell.
-
-Decompressed format:
-```
-┌──────────────────────────────────────────────────────────────┐
-│ Record 0                                                     │
-│   record_length (4 bytes, uint32) - Size of record data      │
-│   record_data (variable) - Building record                   │
-├──────────────────────────────────────────────────────────────┤
-│ Record 1...N                                                 │
-└──────────────────────────────────────────────────────────────┘
-```
-
-Buildings within a block are sorted by OSM ID for delta encoding efficiency.
-
-### Zstd Dictionary Training
-
-The shared dictionary is trained on a representative sample of building data:
-- Sample ~10,000 buildings across diverse geographic regions
-- Train with `zstd --train` at 512 KB dictionary size
-- Dictionary captures common coordinate delta patterns and string prefixes
-
-## Building Record (Binary)
-
-| Field        | Encoding                | Description                          |
-|--------------|-------------------------|--------------------------------------|
-| osm_id       | varint (delta)          | Delta from previous OSM ID in block  |
-| vertex_count | uint8                   | Polygon vertex count (max 255)       |
-| first_lon    | int32                   | First longitude × 100,000            |
-| first_lat    | int32                   | First latitude × 100,000             |
-| deltas       | varint pairs            | Zigzag-encoded delta lon/lat         |
-| flags        | uint8                   | Bit flags for optional fields        |
-| btype_idx    | uint8                   | Building type (see table)            |
-| [btype_str]  | uint8 len + UTF-8       | Only if btype_idx = 255              |
-| [name]       | uint16 len + UTF-8      | Only if flags & 0x01                 |
-| [category]   | uint8 len + UTF-8       | Only if flags & 0x02                 |
-| [name_src]   | uint8 len + UTF-8       | Only if flags & 0x04                 |
-| [poi_osm_id] | uint64                  | Only if flags & 0x08                 |
-
-## Delta Coordinate Encoding
-
-Each subsequent vertex (after the first) is encoded as a pair of zigzag varints.
-
-### Coordinate System
-
-Coordinates are stored as **microdegrees** (degrees × 100,000):
-- 1 microdegree ≈ 1.1m at equator
-- int32 range: ±21,474° (covers entire Earth with room to spare)
-- Precision: ~1.1m at equator, ~0.7m at 50° latitude
-
-### Encoding Process
-
-1. **Calculate delta** from previous vertex (in microdegrees):
-   ```
-   delta_lon = current_lon - previous_lon
-   delta_lat = current_lat - previous_lat
-   ```
-   Typical building wall deltas: -5000 to +5000 microdegrees (-55m to +55m)
-
-2. **Zigzag encoding** converts signed integers to unsigned (small magnitudes → small values):
-   ```
-   zigzag(n) = (n << 1) ^ (n >> 31)
-
-   Examples:
-     0 →  0
-    -1 →  1
-     1 →  2
-    -2 →  3
-     2 →  4
-   ```
-   This maps small negative numbers to small positive numbers, improving varint efficiency.
-
-3. **Varint encoding** (protobuf-style, 7 bits per byte, MSB = continuation):
-   ```
-   while value >= 0x80:
-       emit(0x80 | (value & 0x7F))
-       value >>= 7
-   emit(value)
-
-   Byte costs:
-     0-127:        1 byte
-     128-16383:    2 bytes
-     16384-2097151: 3 bytes
-   ```
-
-### Compression Analysis
-
-| Delta magnitude | Zigzag value | Varint bytes | Typical usage          |
-|-----------------|--------------|--------------|------------------------|
-| 0               | 0            | 1            | Repeated coordinate    |
-| ±1 to ±63       | 1-127        | 1            | Very small walls       |
-| ±64 to ±8191    | 128-16383    | 2            | **Most building walls** |
-| ±8192+          | 16384+       | 3+           | Large buildings        |
-
-Typical building: 5-8 vertices, 2-4 bytes per delta pair = 10-32 bytes for geometry.
-
-### Decoding Implementation
-
-```python
-def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
-    """Decode unsigned varint. Returns (value, bytes_consumed)."""
-    result = shift = 0
-    start = pos
-    while True:
-        b = data[pos]
-        result |= (b & 0x7F) << shift
-        pos += 1
-        if not (b & 0x80):
-            break
-        shift += 7
-    return result, pos - start
-
-def zigzag_decode(n: int) -> int:
-    """Decode zigzag unsigned to signed integer."""
-    return (n >> 1) ^ -(n & 1)
-
-def decode_coordinates(data: bytes, pos: int, first_lon: int, first_lat: int,
-                       vertex_count: int) -> tuple[list, int]:
-    """Decode all coordinates from delta-encoded data."""
-    coords = [[first_lon / 100000, first_lat / 100000]]
-    prev_lon, prev_lat = first_lon, first_lat
-    start_pos = pos
-
-    for _ in range(vertex_count - 1):
-        delta_lon_raw, consumed = decode_varint(data, pos)
-        pos += consumed
-        delta_lat_raw, consumed = decode_varint(data, pos)
-        pos += consumed
-
-        delta_lon = zigzag_decode(delta_lon_raw)
-        delta_lat = zigzag_decode(delta_lat_raw)
-
-        prev_lon += delta_lon
-        prev_lat += delta_lat
-        coords.append([prev_lon / 100000, prev_lat / 100000])
-
-    return coords, pos - start_pos
-```
-
-## OSM ID Delta Encoding
-
-Buildings sorted by OSM ID within each block. First building stores full ID as varint,
-subsequent store delta from previous as varint.
-
-```
-Building 1: OSM ID 130905906 → varint(130905906) = 5 bytes
-Building 2: OSM ID 130905912 → varint(6)         = 1 byte
-Building 3: OSM ID 130905915 → varint(3)         = 1 byte
-Building 4: OSM ID 130905920 → varint(5)         = 1 byte
-```
-
-Typical delta: 1-100 (buildings created in sequence) = 1 byte each.
-
-## Flags Byte
-
-| Bit | Mask | Field Present      | Encoding if present        |
-|-----|------|--------------------|----------------------------|
-| 0   | 0x01 | name               | uint16 length + UTF-8      |
-| 1   | 0x02 | category           | uint8 length + UTF-8       |
-| 2   | 0x04 | name_source        | uint8 length + UTF-8       |
-| 3   | 0x08 | poi_osm_id         | uint64 (8 bytes)           |
-| 4   | 0x10 | height             | uint8 (0.5m steps, 0-127.5m) |
-| 5-7 | -    | reserved           | -                          |
-
-## Building Type Index
-
-20 most common OSM `building=*` values encoded as 1-byte index:
-
-| Index | Type         | Index | Type         |
-|-------|--------------|-------|--------------|
-| 0     | yes          | 10    | shed         |
-| 1     | house        | 11    | detached     |
-| 2     | residential  | 12    | terrace      |
-| 3     | commercial   | 13    | school       |
-| 4     | industrial   | 14    | church       |
-| 5     | retail       | 15    | hospital     |
-| 6     | garage       | 16    | hotel        |
-| 7     | apartments   | 17    | roof         |
-| 8     | office       | 18    | construction |
-| 9     | warehouse    | 19    | barn         |
-| 255   | (variable)   | -     | uint8 len + UTF-8 follows |
-
-Index 255 indicates a custom string follows (rare building types).
-
-## Query Algorithm
-
-1. Convert query lat/lng to H3 cell (resolution 7)
-2. Binary search index for matching H3 cell
-3. Fetch block at offset (HTTP range request or file seek)
-4. Decompress with shared dictionary
-5. Iterate building records, accumulating OSM ID deltas
-6. Reconstruct polygon from delta coordinates
-7. Point-in-polygon test against query point
-8. Return first containing building (or nearest within 50m)
-
-### HTTP Range Request Pattern
-
-For hosted files, cache header + dictionary + index on client (~1 MB).
-Each query requires 1 range request for the data block (~2-50 KB compressed).
-
-```
-GET /US.ptiles
-Range: bytes=0-786432          # Header + dict + index (once, cached)
-
-GET /US.ptiles
-Range: bytes=12345678-12348000 # Single block per query
-```
-
----
-
-## Full Building Decoder (Python)
-
-```python
-import struct
-
-BTYPE_REVERSE = {
-    0: "yes", 1: "house", 2: "residential", 3: "commercial", 4: "industrial",
-    5: "retail", 6: "garage", 7: "apartments", 8: "office", 9: "warehouse",
-    10: "shed", 11: "detached", 12: "terrace", 13: "school", 14: "church",
-    15: "hospital", 16: "hotel", 17: "roof", 18: "construction", 19: "barn",
-}
-
-def decode_building_v6(data: bytes, offset: int, prev_osm_id: int = 0):
-    """Decode v6 binary building record. Returns (building_dict, bytes_consumed)."""
-    pos = offset
-
-    # OSM ID (delta varint)
-    osm_id_delta, consumed = decode_varint(data, pos)
-    pos += consumed
-    osm_id = prev_osm_id + osm_id_delta
-
-    # Vertex count (1 byte)
-    vertex_count = data[pos]
-    pos += 1
-
-    # First coordinate (8 bytes: int32 lon, int32 lat)
-    first_lon, first_lat = struct.unpack_from("<ii", data, pos)
-    pos += 8
-
-    # Delta coordinates (varint zigzag pairs)
-    coords, consumed = decode_coordinates(data, pos, first_lon, first_lat, vertex_count)
-    pos += consumed
-
-    # Flags (1 byte)
-    flags = data[pos]
-    pos += 1
-    has_name = flags & 0x01
-    has_category = flags & 0x02
-    has_name_source = flags & 0x04
-    has_poi_osm_id = flags & 0x08
-    has_height = flags & 0x10
-
-    # Building type (1 byte index or 255 + variable string)
-    btype_idx = data[pos]
-    pos += 1
-    if btype_idx == 255:
-        btype_len = data[pos]
-        pos += 1
-        btype = data[pos:pos + btype_len].decode("utf-8")
-        pos += btype_len
-    else:
-        btype = BTYPE_REVERSE.get(btype_idx, "yes")
-
-    # Calculate centroid
-    lats = [c[1] for c in coords]
-    lons = [c[0] for c in coords]
-    building = {
-        "osm_id": osm_id,
-        "geometry": {"type": "Polygon", "coordinates": [coords]},
-        "centroid_lat": round(sum(lats) / len(lats), 6),
-        "centroid_lon": round(sum(lons) / len(lons), 6),
-        "building_type": btype,
-    }
-
-    # Optional fields
-    if has_name:
-        name_len = struct.unpack_from("<H", data, pos)[0]
-        pos += 2
-        building["name"] = data[pos:pos + name_len].decode("utf-8")
-        pos += name_len
-    if has_category:
-        cat_len = data[pos]
-        pos += 1
-        building["category"] = data[pos:pos + cat_len].decode("utf-8")
-        pos += cat_len
-    if has_name_source:
-        src_len = data[pos]
-        pos += 1
-        building["name_source"] = data[pos:pos + src_len].decode("utf-8")
-        pos += src_len
-    if has_poi_osm_id:
-        building["poi_osm_id"] = struct.unpack_from("<Q", data, pos)[0]
-        pos += 8
-    if has_height:
-        height_byte = data[pos]
-        pos += 1
-        building["height_m"] = height_byte * 0.5
-
-    return building, pos - offset
-```
-
----
-
 ## Version History
 
-| Version | Changes                                          |
-|---------|--------------------------------------------------|
-| **6**   | **Delta OSM IDs + zigzag varint coords (this)**  |
-| 5       | Varint coords, full OSM IDs                      |
-| 4       | Binary footprints, fixed-size coords (4 bytes/delta) |
-| 3       | JSON minimal format (gzip)                       |
-| 1-2     | POI points only (no polygons)                    |
-
----
-
-## Reference Implementations
-
-| Language | File                                 | Notes                    |
-|----------|--------------------------------------|--------------------------|
-| Python   | `scripts/read_ptiles_footprints.py`  | Reader (lines 241-254)   |
-| Python   | `scripts/build_ptiles_footprints.py` | Writer (encoder)         |
-
-### Dependencies
-
-- **h3**: Hexagonal spatial indexing (Uber H3 library)
-- **zstandard**: Compression with trained dictionary
-- **shapely**: Point-in-polygon tests (reader only)
-
----
+| Version | Changes                                                     |
+|---------|-------------------------------------------------------------|
+| **7**   | **Multi-layer: buildings, roads, places, admin, water, rail, parks** |
+| 6       | Delta OSM IDs + zigzag varint coords for buildings          |
+| 5       | Varint coords, full OSM IDs                                 |
+| 4       | Binary footprints, fixed-size coords                        |
+| 3       | JSON minimal format (gzip)                                  |
+| 1-2     | POI points only (no polygons)                               |
 
 ## Size Comparison
 

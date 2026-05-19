@@ -85,8 +85,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response({"error": f"States directory not found"}, 404)
 
         try:
+            profile = qs.get("profile", "driving")
             res = subprocess.run(
-                [str(PTILES_CLI), "route", roads_path, str(lat1), str(lon1), str(lat2), str(lon2), "--json"],
+                [str(PTILES_CLI), "route", roads_path, str(lat1), str(lon1), str(lat2), str(lon2), "--json", f"--profile={profile}"],
                 capture_output=True, text=True, timeout=30
             )
             if res.returncode != 0:

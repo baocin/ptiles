@@ -29,6 +29,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/":
                 self.serve_file("static/index.html", "text/html")
+            elif path == "/favicon.ico":
+                self.serve_file("static/favicon.svg", "image/svg+xml")
+            elif path.startswith("/static/"):
+                self.serve_file(path.lstrip("/"), "text/html")
             elif path == "/api/route":
                 self.route_ptiles(qs)
             elif path == "/api/route-osrm":

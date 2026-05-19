@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ptiles MVP — Route Compare</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
@@ -81,11 +82,14 @@ let buildingsLayer = null;
 let buildingsVisible = false;
 let buildingsTimer = null;
 
+let errorTimer = null;
+
 function showError(msg) {
   const el = document.getElementById('error');
   el.textContent = msg;
   el.style.display = 'block';
-  setTimeout(() => el.style.display = 'none', 5000);
+  if (errorTimer) clearTimeout(errorTimer);
+  errorTimer = setTimeout(() => { el.style.display = 'none'; el.textContent = ''; }, 5000);
 }
 
 function parseLatLon(str) {
@@ -94,15 +98,28 @@ function parseLatLon(str) {
   return null;
 }
 
+function fmtDuration(sec) {
+  if (!sec) return '';
+  if (sec >= 3600) return `${(sec / 3600).toFixed(1)}h`;
+  if (sec >= 120) return `${(sec / 60).toFixed(1)}min`;
+  return `${Math.round(sec)}s`;
+}
+
+function fmtDist(m) {
+  if (!m) return '';
+  if (m >= 1000) return `${(m / 1000).toFixed(1)}km`;
+  return `${Math.round(m)}m`;
+}
+
 function updateStats(ptiles, osrm) {
   const el = document.getElementById('stats');
   let html = '';
   if (ptiles && ptiles.duration_seconds) {
-    html += `ptiles: ${(ptiles.duration_seconds / 60).toFixed(1)}min ${(ptiles.distance_meters / 1000).toFixed(1)}km`;
+    html += `ptiles: ${fmtDuration(ptiles.duration_seconds)} ${fmtDist(ptiles.distance_meters)}`;
   }
   if (osrm && osrm.duration_seconds) {
     if (html) html += ' &nbsp;|&nbsp; ';
-    html += `OSRM: ${(osrm.duration_seconds / 60).toFixed(1)}min ${(osrm.distance_meters / 1000).toFixed(1)}km`;
+    html += `OSRM: ${fmtDuration(osrm.duration_seconds)} ${fmtDist(osrm.distance_meters)}`;
   }
   el.innerHTML = html || '';
 }

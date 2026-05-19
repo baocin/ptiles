@@ -42,6 +42,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   <label><input type="checkbox" id="auto-random" onchange="toggleAutoRandom()"> Auto</label>
   <button class="secondary" id="btn-roads" onclick="toggleRoadsLayer()">Show Roads</button>
   <button class="secondary" id="btn-buildings" onclick="toggleBuildingsLayer()">Show Buildings</button>
+  <select id="profile-select" onchange="route()" style="padding:8px 12px;border:1px solid #0f3460;border-radius:6px;background:#1a1a2e;color:#e0e0e0;font-size:14px;">
+    <option value="driving">Driving</option>
+    <option value="walking">Walking</option>
+    <option value="cycling">Cycling</option>
+  </select>
   <button class="secondary" id="btn-basemap" onclick="toggleBasemap()">OSM</button>
   <div class="stats" id="stats"></div>
 </div>
@@ -274,8 +279,9 @@ async function route() {
   map.fitBounds([[origin[0], origin[1]], [dest[0], dest[1]]], { padding: [50, 50] });
 
   // Query both
+  const profile = document.getElementById('profile-select').value;
   const [ptilesRes, osrmRes] = await Promise.all([
-    fetch(`/api/route?lat1=${origin[0]}&lon1=${origin[1]}&lat2=${dest[0]}&lon2=${dest[1]}`).then(r => r.json()),
+    fetch(`/api/route?lat1=${origin[0]}&lon1=${origin[1]}&lat2=${dest[0]}&lon2=${dest[1]}&profile=${profile}`).then(r => r.json()),
     fetch(`/api/route-osrm?lat1=${origin[0]}&lon1=${origin[1]}&lat2=${dest[0]}&lon2=${dest[1]}`).then(r => r.json()),
   ]);
 

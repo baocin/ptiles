@@ -30,6 +30,11 @@ __all__ = [
     "ROAD_CLASS_REVERSE", "SURFACE_REVERSE",
     "WATER_TYPES",
     "decode_water_record",
+    # v2 additions
+    "INDEX_ENTRY_SIZE_V2",
+    "decode_coords_u16",
+    "decode_index_entry_v2", "decode_index_v2",
+    "decode_merged_block_header",
 ]
 
 
@@ -429,3 +434,110 @@ WATER_TYPES = [
     "creek", "canal", "drain", "bay", "ocean",
     "wetland", "marsh", "swamp", "estuary",
 ]
+
+
+# ===========================================================================
+# v2 Format Support (SPEC_v2.md)
+# ===========================================================================
+#
+# v2 reader additions. v1 paths above remain untouched.
+#   - 37-byte index entries with per-cell bbox + cell_index_in_block
+#   - Merged blocks (multiple sparse H3 cells share one zstd block)
+#   - u16 cell-relative coordinates (saves bytes vs i32)
+
+INDEX_ENTRY_SIZE_V2 = 37  # 8 + 4*4 + 6 + 3 + 2 + 2
+
+
+def decode_coords_u16(data: bytes, pos: int, center_lon_micro: int,
+                      center_lat_micro: int,
+                      vertex_count: int) -> tuple[list[tuple[float, float]], int]:
+    """Decode u16-encoded coordinate sequence. Returns (coords, bytes_consumed).
+
+    Layout:
+      first vertex: u16 ux, u16 uy (lon/lat biased by 32768 around center)
+      subsequent:   zigzag varint deltas in microdegrees
+    """
+    start_pos = pos
+    coords: list[tuple[float, float]] = []
+    prev_lon_micro = 0
+    prev_lat_micro = 0
+    for i in range(vertex_count):
+        if i == 0:
+            ux, uy = struct.unpack_from("<HH", data, pos)
+            pos += 4
+            lon_micro = (ux - 32768) + center_lon_micro
+            lat_micro = (uy - 32768) + center_lat_micro
+        else:
+            dx_raw, consumed = decode_varint(data, pos)
+            pos += consumed
+            dy_raw, consumed = decode_varint(data, pos)
+            pos += consumed
+            lon_micro = prev_lon_micro + zigzag_decode(dx_raw)
+            lat_micro = prev_lat_micro + zigzag_decode(dy_raw)
+        coords.append((lon_micro / 100_000, lat_micro / 100_000))
+        prev_lon_micro = lon_micro
+        prev_lat_micro = lat_micro
+    return coords, pos - start_pos
+
+
+def decode_index_entry_v2(data: bytes, pos: int) -> dict:
+    """Decode a 37-byte v2 spatial index entry."""
+    h3_cell, min_lon, min_lat, max_lon, max_lat = struct.unpack_from(
+        "<Qiiii", data, pos)
+    block_offset = int.from_bytes(data[pos + 24:pos + 30], "little")
+    block_length = int.from_bytes(data[pos + 30:pos + 33], "little")
+    feature_count, cell_index = struct.unpack_from("<HH", data, pos + 33)
+    return {
+        "h3_cell": h3_cell,
+        "min_lon": min_lon,
+        "min_lat": min_lat,
+        "max_lon": max_lon,
+        "max_lat": max_lat,
+        "block_offset": block_offset,
+        "block_length": block_length,
+        "feature_count": feature_count,
+        "cell_index": cell_index,
+    }
+
+
+def decode_index_v2(data: bytes) -> list[dict]:
+    """Parse a v2 spatial index from bytes (u32 entry_count + entries)."""
+    entry_count = struct.unpack_from("<I", data, 0)[0]
+    entries = []
+    pos = 4
+    for _ in range(entry_count):
+        entries.append(decode_index_entry_v2(data, pos))
+        pos += INDEX_ENTRY_SIZE_V2
+    return entries
+
+
+def decode_merged_block_header(data: bytes) -> dict:
+    """Parse the header of a v2 merged block.
+
+    Layout:
+      i32 center_lon_micro
+      i32 center_lat_micro
+      u32 cell_count
+      per-cell: u64 cell_id, u32 record_offset
+      (record_data follows; offsets are relative to its start)
+
+    Returns dict with:
+      center_lon_micro, center_lat_micro, cell_count,
+      cell_offsets: list[(cell_id, record_offset)],
+      record_data_offset: byte position where record_data starts in `data`.
+    """
+    center_lon_micro, center_lat_micro, cell_count = struct.unpack_from(
+        "<iiI", data, 0)
+    pos = 12
+    cell_offsets: list[tuple[int, int]] = []
+    for _ in range(cell_count):
+        cell_id, record_offset = struct.unpack_from("<QI", data, pos)
+        cell_offsets.append((cell_id, record_offset))
+        pos += 12
+    return {
+        "center_lon_micro": center_lon_micro,
+        "center_lat_micro": center_lat_micro,
+        "cell_count": cell_count,
+        "cell_offsets": cell_offsets,
+        "record_data_offset": pos,
+    }

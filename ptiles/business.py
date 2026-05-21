@@ -201,6 +201,9 @@ class BusinessReader:
         else:
             self._categories = self._load_sidecar_categories()
 
+        self._block_cache: dict[int, list[dict]] = {}
+        self._block_cache_max = 5000
+
     @classmethod
     def open(cls, path: str | os.PathLike, *,
              categories: list[str] | str | os.PathLike | None = None
@@ -245,6 +248,10 @@ class BusinessReader:
 
     def _read_block(self, cell_int: int) -> list[dict]:
         """Read and decode a block for a given H3 cell."""
+        # Check block cache first
+        if cell_int in self._block_cache:
+            return self._block_cache[cell_int]
+
         entry = binary_search_index(self._index, cell_int)
         if entry is None:
             return []
@@ -263,7 +270,14 @@ class BusinessReader:
             except Exception as e:
                 logger.warning("Decompress failed for cell %d: %s", cell_int, e)
                 return []
-        return decode_block(raw)
+        result = decode_block(raw)
+
+        # Cache the result
+        if len(self._block_cache) >= self._block_cache_max:
+            self._block_cache.clear()
+        self._block_cache[cell_int] = result
+
+        return result
 
     def _dict_to_business(self, d: dict) -> Business:
         """Convert a decoded dict to a Business dataclass with resolved category."""

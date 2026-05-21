@@ -220,21 +220,27 @@ def point_to_segment_distance_meters(
     px: float, py: float,  # query (lon, lat)
     ax: float, ay: float,  # segment start (lon, lat)
     bx: float, by: float,  # segment end (lon, lat)
+    m_per_deg_lon: float | None = None,
 ) -> tuple[float, float, float, float]:
     """Compute planar point-to-segment distance with latitude scaling.
 
-    Returns (distance_meters, snapped_lon, snapped_lat, along_fraction).
+    If m_per_deg_lon is provided (precomputed from query point), it's used
+    instead of computing per-segment. Saves ~3 trig calls per call.
     """
-    mean_lat = (py + ay + by) / 3.0
-    m_per_deg_lat = 111320.0
-    m_per_deg_lon = 111320.0 * max(math.cos(math.radians(mean_lat)), 0.001)
+    if m_per_deg_lon is not None:
+        mlon = m_per_deg_lon
+        mlat = 111320.0
+    else:
+        mean_lat = (py + ay + by) / 3.0
+        mlat = 111320.0
+        mlon = 111320.0 * max(math.cos(math.radians(mean_lat)), 0.001)
 
-    pxm = px * m_per_deg_lon
-    pym = py * m_per_deg_lat
-    axm = ax * m_per_deg_lon
-    aym = ay * m_per_deg_lat
-    bxm = bx * m_per_deg_lon
-    bym = by * m_per_deg_lat
+    pxm = px * mlon
+    pym = py * mlat
+    axm = ax * mlon
+    aym = ay * mlat
+    bxm = bx * mlon
+    bym = by * mlat
 
     dx = bxm - axm
     dy = bym - aym
@@ -328,6 +334,9 @@ class RoadsReader:
             first_off = self._index[0]["block_offset"]
             self._relative_offsets = first_off < self._header["blocks_offset"]
 
+        self._block_cache: dict[int, tuple[list[RoadSegment], list[Intersection]]] = {}
+        self._block_cache_max = 5000
+
     @classmethod
     def open(cls, path: str | os.PathLike) -> "RoadsReader":
         """Open a .roads.ptiles file."""
@@ -345,6 +354,10 @@ class RoadsReader:
 
     def _read_block(self, cell_int: int) -> tuple[list[RoadSegment], list[Intersection]]:
         """Read and decode a block for a given H3 cell."""
+        # Check block cache first
+        if cell_int in self._block_cache:
+            return self._block_cache[cell_int]
+
         entry = binary_search_index(self._index, cell_int)
         if entry is None:
             return [], []
@@ -366,7 +379,14 @@ class RoadsReader:
                 logger.warning("Decompress failed for cell %d: %s", cell_int, e)
                 return [], []
 
-        return decode_block(raw, self._version)
+        roads, intersections = decode_block(raw, self._version)
+
+        # Cache the result
+        if len(self._block_cache) >= self._block_cache_max:
+            self._block_cache.clear()
+        self._block_cache[cell_int] = (roads, intersections)
+
+        return roads, intersections
 
     def get_in_cell(self, cell: int | str) -> list[RoadSegment]:
         """Get all road segments in a single H3 res-7 cell."""
@@ -420,6 +440,8 @@ class RoadsReader:
         """
         cell = h3.latlng_to_cell(lat, lon, 7)
         _point_to_seg = point_to_segment_distance_meters
+        # Precompute lat scale once for all segments (saves ~3 trig calls per segment)
+        _m_per_deg_lon = 111320.0 * max(math.cos(math.radians(lat)), 0.001)
 
         best: NearestRoad | None = None
         best_dist = float('inf')
@@ -442,6 +464,7 @@ class RoadsReader:
                         lon, lat,
                         coords[i][0], coords[i][1],
                         coords[i + 1][0], coords[i + 1][1],
+                        _m_per_deg_lon,
                     )
                     if d < best_dist and d <= radius_meters:
                         best_dist = d
@@ -460,6 +483,7 @@ class RoadsReader:
         cell = h3.latlng_to_cell(lat, lon, 7)
         neighbor_cells = h3.grid_disk(cell, 1)
         _point_to_seg = point_to_segment_distance_meters
+        _m_per_deg_lon = 111320.0 * max(math.cos(math.radians(lat)), 0.001)
 
         all_results: list[NearestRoad] = []
         seen_osm: set[int] = set()
@@ -487,6 +511,7 @@ class RoadsReader:
                         lon, lat,
                         coords[i][0], coords[i][1],
                         coords[i + 1][0], coords[i + 1][1],
+                        _m_per_deg_lon,
                     )
                     if d < best_dist:
                         best_dist = d

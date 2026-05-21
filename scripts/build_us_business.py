@@ -19,6 +19,7 @@ from shared import (
     write_header, HEADER_SIZE, encode_index_entry,
     encode_varint, encode_string_u8, encode_string_u16,
     zigzag_encode, compress_block, train_dictionary,
+    build_v2_file,
 )
 from states import STATES, state_bbox
 
@@ -29,6 +30,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 H3_RES = 7
 MAGIC = b"PTILESB\0"
 VERSION = 1
+VERSION_V2 = 2
 
 # Build state bbox lookup
 STATE_BOXES = {}
@@ -296,21 +298,138 @@ def pass2_encode(state_counts):
     print(f"  Size:   {total_bytes:,} bytes ({total_bytes/1024/1024:.1f} MB)", flush=True)
     print(f"  Time:   {total_time:.0f}s", flush=True)
 
+# --- Pass 2 (v2): merged blocks + u16 coords + bbox index ---
+
+def encode_record_attrs_v2(place, cat_index):
+    """v2 record attrs (everything after vertex_count + u16 coords).
+
+    v1 body order: osm_id, lon, lat, name, cat, flags, optionals.
+    v2 attrs order: osm_id, name, cat, flags, optionals.
+    Coords are moved out of the record body into the merged-block header
+    via encode_coords_u16 (handled by shared.build_v2_file).
+    """
+    buf = bytearray()
+    osm_id = abs(hash(place["id"])) & 0x7FFFFFFFFFFFFFFF
+    buf.extend(encode_varint(zigzag_encode(osm_id)))
+    buf.extend(encode_string_u16(place["name"]))
+
+    cat = place.get("cat", "")
+    buf.append(cat_index.get(cat, 0))
+
+    flags = 0
+    phone = place.get("phone", "")
+    website = place.get("web", "")
+    address = place.get("addr", "")
+    brand = place.get("brand", "")
+    status = place.get("op", "")
+    email = place.get("email", "")
+    social = place.get("social", "")
+    if phone:   flags |= 0x01
+    if website: flags |= 0x02
+    if address: flags |= 0x04
+    if brand:   flags |= 0x08
+    if status == "permanently_closed":    flags |= 0x10
+    elif status == "temporarily_closed":  flags |= 0x12
+    if email:   flags |= 0x20
+    if social:  flags |= 0x40
+    buf.append(flags)
+    if phone:   buf.extend(encode_string_u8(phone))
+    if website: buf.extend(encode_string_u8(website))
+    if address: buf.extend(encode_string_u16(address))
+    if brand:   buf.extend(encode_string_u8(brand))
+    if email:   buf.extend(encode_string_u8(email))
+    if social:  buf.extend(encode_string_u8(social))
+
+    return bytes(buf)
+
+
+def pass2_encode_v2(state_counts):
+    """Read per-state temp files, emit v2 PTILESB (merged blocks, u16 coords)."""
+    print(f"\nPass 2 (v2): Encoding {len(state_counts)} states...", flush=True)
+    total_places = 0
+    total_bytes = 0
+    t0 = time.time()
+
+    for st in sorted(state_counts.keys(), key=lambda x: -state_counts[x]):
+        tf = TEMP_DIR / f"{st}.jsonl"
+        print(f"\n=== {st}: {state_counts[st]:,} places ===", flush=True)
+        t1 = time.time()
+
+        places = []
+        with open(tf) as f:
+            for line in f:
+                places.append(json.loads(line))
+        if not places:
+            continue
+
+        # Build category index (same shape as v1)
+        cat_counts = defaultdict(int)
+        for p in places:
+            if p.get("cat"):
+                cat_counts[p["cat"]] += 1
+        sorted_cats = sorted(cat_counts.items(), key=lambda x: -x[1])
+        cat_index = {}
+        cat_list = []
+        for i, (cat, _) in enumerate(sorted_cats[:254]):
+            cat_index[cat] = i + 1
+            cat_list.append(cat)
+
+        # Build v2 layer_data: each business is a single-vertex feature.
+        layer_data = []
+        for p in places:
+            cell_str = h3.latlng_to_cell(p["lat"], p["lon"], H3_RES)
+            layer_data.append({
+                "h3_cell": int(cell_str, 16),
+                "coords": [(p["lon"], p["lat"])],
+                "attrs": encode_record_attrs_v2(p, cat_index),
+            })
+
+        out_path = OUTPUT_DIR / f"{st}.business.ptiles"
+        build_v2_file(layer_data, str(out_path), MAGIC, VERSION_V2,
+                      compression_level=9, merge_threshold=100)
+
+        cat_path = OUTPUT_DIR / f"{st}.business_categories.json"
+        with open(cat_path, "w") as f:
+            json.dump({"categories": cat_list}, f)
+
+        dt = time.time() - t1
+        sz = out_path.stat().st_size
+        print(f"  {sz:,} bytes in {dt:.0f}s", flush=True)
+        total_places += len(places)
+        total_bytes += sz
+
+    total_time = time.time() - t0
+    print(f"\n=== SUMMARY (v2) ===", flush=True)
+    print(f"  States: {len(state_counts)}", flush=True)
+    print(f"  Places: {total_places:,}", flush=True)
+    print(f"  Size:   {total_bytes:,} bytes ({total_bytes/1024/1024:.1f} MB)", flush=True)
+    print(f"  Time:   {total_time:.0f}s", flush=True)
+
+
 def main():
-    print("=== US Business PTILESB ===", flush=True)
+    import argparse
+    ap = argparse.ArgumentParser(description="Build US business PTILESB")
+    ap.add_argument("--v2", action="store_true",
+                    help="Emit v2 format (merged blocks, u16 coords, bbox index)")
+    args = ap.parse_args()
+
+    print(f"=== US Business PTILESB {'(v2)' if args.v2 else '(v1)'} ===", flush=True)
     print(f"Temp: {TEMP_DIR}", flush=True)
     print(f"Output: {OUTPUT_DIR}", flush=True)
     print(f"States: {len(STATE_BOXES)}", flush=True)
     print(flush=True)
-    
+
     # Clean temp from previous run
     if TEMP_DIR.exists():
         import shutil
         shutil.rmtree(TEMP_DIR)
-    
+
     state_counts = pass1_scan()
     if state_counts:
-        pass2_encode(state_counts)
+        if args.v2:
+            pass2_encode_v2(state_counts)
+        else:
+            pass2_encode(state_counts)
         print(f"\nUpload: AWS_PROFILE=mdt-r2 aws s3 cp {OUTPUT_DIR}/*.business* s3://mydatatimeline/maps/", flush=True)
 
 if __name__ == "__main__":

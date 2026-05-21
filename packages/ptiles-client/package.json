@@ -1,0 +1,21 @@
+{
+  "name": "@ptiles/client",
+  "version": "0.1.0",
+  "description": "TypeScript/JS client library for PTILES geographic data files",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "bench": "vitest bench"
+  },
+  "keywords": ["ptiles", "geographic", "h3", "mapping"],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.2"
+  }
+}

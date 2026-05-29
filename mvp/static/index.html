@@ -3,98 +3,138 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ptiles MVP — Route Compare</title>
+<title>ptiles &middot; map</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
-#header { background: #16213e; padding: 12px 20px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #0f3460; flex-wrap: wrap; }
-#header h1 { font-size: 18px; color: #e94560; margin: 0; }
-#header input { padding: 8px 12px; border: 1px solid #0f3460; border-radius: 6px; background: #1a1a2e; color: #e0e0e0; font-size: 14px; width: 180px; }
-#header input::placeholder { color: #555; }
-#header button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; background: #e94560; color: white; }
-#header button:hover { background: #c23350; }
-#header button.secondary { background: #0f3460; }
-#header button.secondary:hover { background: #1a4a80; }
-#header button.active { background: #22c55e; color: #000; }
-#header label { font-size: 13px; color: #aaa; display: flex; align-items: center; gap: 6px; }
-#header .stats { font-size: 12px; color: #888; margin-left: auto; display: flex; gap: 20px; }
-#map { flex: 1; }
-.legend { background: rgba(22, 33, 62, 0.95); padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.6; color: #e0e0e0; }
-.legend-item { display: flex; align-items: center; gap: 8px; }
-.legend-color { width: 24px; height: 4px; border-radius: 2px; }
-.route-info { background: rgba(22, 33, 62, 0.95); padding: 8px 14px; border-radius: 8px; margin-top: 6px; font-size: 13px; color: #e0e0e0; }
-.route-info div { margin: 2px 0; }
-.building-popup { font-size: 13px; color: #e0e0e0; }
-.building-popup strong { color: #e94560; }
-.error-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #c23350; color: white; padding: 10px 20px; border-radius: 6px; font-size: 14px; z-index: 10000; display: none; }
-@media (max-width: 800px) { #header input { width: 120px; } #header { gap: 6px; } }
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#09090e;color:#c8c8d0;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+#topbar{background:#0f0f17;border-bottom:1px solid #1a1a28;padding:0;display:flex;align-items:stretch;flex-wrap:nowrap;min-height:44px}
+#topbar .brand{display:flex;align-items:center;padding:0 16px;background:#141420;border-right:1px solid #1a1a28;gap:8px}
+#topbar .brand svg{width:18px;height:18px;display:block}
+#topbar .brand span{font-size:13px;font-weight:600;color:#e8e8f0;letter-spacing:.5px}
+#topbar .brand small{font-size:10px;color:#555}
+#topbar .section{display:flex;align-items:center;gap:8px;padding:0 12px;border-right:1px solid #1a1a28}
+#topbar .section:last-child{border-right:none}
+#topbar .section label{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.8px}
+.coord-input{background:#09090e;border:1px solid #1e1e2a;border-radius:4px;padding:5px 8px;color:#c8c8d0;font-size:12px;font-family:'SF Mono','Cascadia Code',monospace;width:130px;outline:none;transition:border-color .15s}
+.coord-input:focus{border-color:#3b3b5c}
+.coord-input::placeholder{color:#333}
+.btn{background:#1a1a28;border:1px solid #2a2a3e;border-radius:4px;padding:5px 12px;color:#c8c8d0;font-size:11px;cursor:pointer;transition:all .1s;font-weight:500;white-space:nowrap}
+.btn:hover{background:#252540;border-color:#3b3b5c;color:#e8e8f0}
+.btn:active{background:#303050}
+.btn.primary{background:#2a2a4e;border-color:#3b3b6c;color:#d0d0f0}
+.btn.primary:hover{background:#353560;border-color:#505080}
+.btn.active{background:#1a3a2a;border-color:#2a6a4a;color:#4ade80}
+.btn-sm{padding:3px 8px;font-size:10px}
+select{background:#09090e;border:1px solid #1e1e2a;border-radius:4px;padding:5px 8px;color:#c8c8d0;font-size:11px;outline:none;cursor:pointer}
+select:focus{border-color:#3b3b5c}
+#stats{font-size:11px;color:#666;display:flex;gap:16px;align-items:center;margin-left:auto;padding:0 16px}
+#stats .stat{display:flex;gap:6px;align-items:center}
+#stats .num{color:#c8c8d0;font-weight:500}
+#stats .label{color:#555;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+#map{flex:1;z-index:0}
+#log-bar{display:none;background:#0a0a10;border-bottom:1px solid #1a1a28;padding:4px 12px}
+#log-bar textarea{width:100%;height:48px;background:#0a0a10;color:#555;border:1px solid #1a1a28;border-radius:4px;font-family:'SF Mono','Cascadia Code',monospace;font-size:10px;padding:4px 8px;resize:vertical;white-space:pre;overflow:auto;outline:none}
+#log-bar textarea:focus{border-color:#2a2a3e}
+.leaflet-container{background:#0a0a12}
+.leaflet-control-zoom a{background:#141420!important;color:#c8c8d0!important;border-color:#1a1a28!important}
+.leaflet-control-zoom a:hover{background:#1e1e30!important}
+.leaflet-popup-content-wrapper{background:#141420!important;color:#c8c8d0!important;border-radius:6px!important;box-shadow:0 4px 20px rgba(0,0,0,.5)!important;border:1px solid #1a1a28!important}
+.leaflet-popup-tip{background:#141420!important;border:1px solid #1a1a28!important}
+.leaflet-popup-content{margin:10px 14px!important;font-size:12px!important;line-height:1.5!important}
+.popup-title{color:#e8e8f0;font-weight:600;font-size:13px}
+.popup-meta{color:#666;font-size:10px;margin-top:2px}
+.popup-label{color:#555;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1a1a28;color:#c8c8d0;padding:8px 20px;border-radius:6px;font-size:12px;z-index:10000;display:none;border:1px solid #2a2a3e;box-shadow:0 4px 12px rgba(0,0,0,.4)}
+.legend{background:rgba(15,15,23,.92)!important;border:1px solid #1a1a28!important;border-radius:6px!important;padding:8px 12px!important;font-size:11px!important;color:#c8c8d0!important;line-height:1.6!important}
+.legend-item{display:flex;align-items:center;gap:8px}
+.legend-swatch{width:20px;height:3px;border-radius:2px}
+.legend-swatch.ptiles{background:#e94560}
+.legend-swatch.osrm{background:#4488ff}
+@media(max-width:900px){#topbar{flex-wrap:wrap;min-height:auto}.coord-input{width:100px;font-size:11px}#topbar .section{padding:4px 8px}#stats{padding:4px 8px;flex-wrap:wrap;gap:8px}.brand{display:none!important}}
 </style>
 </head>
 <body>
-<div id="header">
-  <h1>ptiles</h1>
-  <input id="origin-input" placeholder="Origin lat,lon" value="36.1384,-86.8004">
-  <input id="dest-input" placeholder="Dest lat,lon" value="36.1262,-86.8461">
-  <button onclick="route()">Route</button>
-  <button class="secondary" onclick="randomRoute()">Random</button>
-  <label><input type="checkbox" id="auto-random" onchange="toggleAutoRandom()"> Auto</label>
-  <button class="secondary" id="btn-roads" onclick="toggleRoadsLayer()">Show Roads</button>
-  <button class="secondary" id="btn-buildings" onclick="toggleBuildingsLayer()">Show Buildings</button>
-  <select id="profile-select" onchange="route()" style="padding:8px 12px;border:1px solid #0f3460;border-radius:6px;background:#1a1a2e;color:#e0e0e0;font-size:14px;">
-    <option value="driving">Driving</option>
-    <option value="walking">Walking</option>
-    <option value="cycling">Cycling</option>
-  </select>
-  <button class="secondary" id="btn-basemap" onclick="toggleBasemap()">OSM</button>
-  <button class="secondary" id="btn-log" onclick="toggleRouteLog()" style="font-size:11px;">Log</button>
-  <div class="stats" id="stats"></div>
+
+<div id="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="1.5"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+    <span>ptiles</span>
+    <small>v8</small>
+  </div>
+
+  <div class="section">
+    <label>Origin</label>
+    <input id="origin-input" class="coord-input" placeholder="lat,lon" value="36.1384,-86.8004">
+  </div>
+
+  <div class="section">
+    <label>Dest</label>
+    <input id="dest-input" class="coord-input" placeholder="lat,lon" value="36.1262,-86.8461">
+  </div>
+
+  <div class="section">
+    <button class="btn primary" onclick="route()">Route</button>
+    <button class="btn btn-sm" onclick="randomRoute()">Random</button>
+    <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:10px;color:#555">
+      <input type="checkbox" id="auto-random" onchange="toggleAutoRandom()" style="accent-color:#4ade80"> Auto
+    </label>
+  </div>
+
+  <div class="section">
+    <select id="profile-select" onchange="route()">
+      <option value="driving">Driving</option>
+      <option value="walking">Walking</option>
+      <option value="cycling">Cycling</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <button class="btn btn-sm" id="btn-roads" onclick="toggleRoadsLayer()">Roads</button>
+    <button class="btn btn-sm" id="btn-buildings" onclick="toggleBuildingsLayer()">Buildings</button>
+    <button class="btn btn-sm" id="btn-basemap" onclick="toggleBasemap()">OSM</button>
+    <button class="btn btn-sm" id="btn-log" onclick="toggleLog()" style="color:#555">Log</button>
+  </div>
+
+  <div id="stats"></div>
 </div>
-<div id="route-log-bar" style="display:none;padding:4px 20px;background:#0d1117;border-bottom:1px solid #30363d;">
-  <textarea id="route-log" readonly style="width:100%;height:54px;background:#0d1117;color:#8b949e;border:1px solid #30363d;border-radius:4px;font-family:monospace;font-size:11px;padding:4px 8px;resize:vertical;white-space:pre;overflow:auto;" onclick="this.select();navigator.clipboard.writeText(this.value);showError('Log copied')"></textarea>
+
+<div id="log-bar">
+  <textarea id="route-log" readonly onclick="this.select();navigator.clipboard.writeText(this.value);showToast('Copied')"></textarea>
 </div>
+
 <div id="map"></div>
-<div id="error" class="error-toast"></div>
+<div id="toast"></div>
 
 <script>
-const map = L.map('map').setView([36.15, -86.78], 12);
+const map = L.map('map', { zoomControl: true }).setView([36.15, -86.78], 12);
 
-// --- Basemap layers ---
+// --- Basemaps ---
 const osmTile = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenStreetMap',
-  maxZoom: 19
+  attribution: '&copy; OpenStreetMap', maxZoom: 19
 });
 const freeMapTile = L.tileLayer('https://tiles.openfreemap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenFreeMap',
-  maxZoom: 19
+  attribution: '&copy; OpenFreeMap', maxZoom: 19
 });
-
 let currentBasemap = 'osm';
 osmTile.addTo(map);
 
 // --- State ---
-let ptilesLayer = null;
-let osrmLayer = null;
-let autoTimer = null;
-let searchMarker = null;
-let roadsLayer = null;
-let roadsVisible = false;
-let roadsTimer = null;
-let buildingsLayer = null;
-let buildingsVisible = false;
-let buildingsTimer = null;
+let ptilesLayer = null, osrmLayer = null, autoTimer = null, searchMarker = null;
+let roadsLayer = null, roadsVisible = false, roadsTimer = null;
+let buildingsLayer = null, buildingsVisible = false, buildingsTimer = null;
 let clickBuildingHighlight = null;
+let toastTimer = null;
+let roadLegend = null;
 
-let errorTimer = null;
-
-function showError(msg) {
-  const el = document.getElementById('error');
+function showToast(msg) {
+  const el = document.getElementById('toast');
   el.textContent = msg;
   el.style.display = 'block';
-  if (errorTimer) clearTimeout(errorTimer);
-  errorTimer = setTimeout(() => { el.style.display = 'none'; el.textContent = ''; }, 5000);
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.style.display = 'none'; }, 3000);
 }
 
 function parseLatLon(str) {
@@ -120,26 +160,21 @@ function updateStats(ptiles, osrm) {
   const el = document.getElementById('stats');
   let html = '';
   if (ptiles && ptiles.duration_seconds) {
-    html += `ptiles: ${fmtDuration(ptiles.duration_seconds)} ${fmtDist(ptiles.distance_meters)}`;
+    html += `<span class="stat"><span class="label">ptiles</span><span class="num">${fmtDuration(ptiles.duration_seconds)} / ${fmtDist(ptiles.distance_meters)}</span></span>`;
   }
   if (osrm && osrm.duration_seconds) {
-    if (html) html += ' &nbsp;|&nbsp; ';
-    html += `OSRM: ${fmtDuration(osrm.duration_seconds)} ${fmtDist(osrm.distance_meters)}`;
+    html += `<span class="stat"><span class="label">osrm</span><span class="num">${fmtDuration(osrm.duration_seconds)} / ${fmtDist(osrm.distance_meters)}</span></span>`;
   }
-  el.innerHTML = html || '';
+  el.innerHTML = html || '<span class="stat" style="color:#333">no route</span>';
 }
 
 function drawRoute(data, color, label) {
   if (!data || !data.path || data.path.length < 2) return null;
-  const coords = data.path.map(p => [p[1], p[0]]); // [lat, lon]
-  // Semi-transparent thicker lines so overlaps are visible
+  const coords = data.path.map(p => [p[1], p[0]]);
   const polyline = L.polyline(coords, { color, weight: 5, opacity: 0.75 }).addTo(map);
   polyline.bindPopup(`
-    <div class="route-info">
-      <div><b>${label}</b></div>
-      <div>${(data.duration_seconds / 60).toFixed(1)} min</div>
-      <div>${(data.distance_meters / 1000).toFixed(1)} km</div>
-    </div>
+    <div class="popup-title">${label}</div>
+    <div class="popup-meta">${(data.duration_seconds / 60).toFixed(1)} min &middot; ${(data.distance_meters / 1000).toFixed(1)} km</div>
   `);
   return polyline;
 }
@@ -148,20 +183,16 @@ function drawRoute(data, color, label) {
 function toggleBasemap() {
   const btn = document.getElementById('btn-basemap');
   if (currentBasemap === 'osm') {
-    map.removeLayer(osmTile);
-    freeMapTile.addTo(map);
-    currentBasemap = 'freemap';
-    btn.textContent = 'FreeMap';
+    map.removeLayer(osmTile); freeMapTile.addTo(map);
+    currentBasemap = 'freemap'; btn.textContent = 'FreeMap';
   } else {
-    map.removeLayer(freeMapTile);
-    osmTile.addTo(map);
-    currentBasemap = 'osm';
-    btn.textContent = 'OSM';
+    map.removeLayer(freeMapTile); osmTile.addTo(map);
+    currentBasemap = 'osm'; btn.textContent = 'OSM';
   }
 }
 
-function toggleRouteLog() {
-  const bar = document.getElementById('route-log-bar');
+function toggleLog() {
+  const bar = document.getElementById('log-bar');
   bar.style.display = bar.style.display === 'none' ? 'block' : 'none';
 }
 
@@ -170,15 +201,30 @@ function toggleRoadsLayer() {
   const btn = document.getElementById('btn-roads');
   roadsVisible = !roadsVisible;
   if (roadsVisible) {
-    btn.textContent = 'Hide Roads';
     btn.classList.add('active');
     loadRoadsForViewport();
     map.on('moveend', onMapMoveEnd);
+    if (!roadLegend) {
+      roadLegend = L.control({position: 'bottomright'});
+      roadLegend.onAdd = () => {
+        const div = L.DomUtil.create('div', 'legend');
+        div.innerHTML = `
+          <div class="legend-item"><span class="legend-swatch" style="background:#ff6600"></span>Motorway</div>
+          <div class="legend-item"><span class="legend-swatch" style="background:#dd4400"></span>Trunk</div>
+          <div class="legend-item"><span class="legend-swatch" style="background:#ff9900"></span>Primary</div>
+          <div class="legend-item"><span class="legend-swatch" style="background:#ffcc00"></span>Secondary</div>
+          <div class="legend-item"><span class="legend-swatch" style="background:#ffff66"></span>Tertiary</div>
+          <div class="legend-item"><span class="legend-swatch" style="background:#88aaff"></span>Residential</div>
+        `;
+        return div;
+      };
+      roadLegend.addTo(map);
+    }
   } else {
-    btn.textContent = 'Show Roads';
     btn.classList.remove('active');
     map.off('moveend', onMapMoveEnd);
     if (roadsLayer) { map.removeLayer(roadsLayer); roadsLayer = null; }
+    if (roadLegend) { map.removeControl(roadLegend); roadLegend = null; }
   }
 }
 
@@ -198,41 +244,31 @@ async function loadRoadsForViewport() {
   try {
     const res = await fetch(`/api/roads-bounds?min_lat=${minLat}&min_lon=${minLon}&max_lat=${maxLat}&max_lon=${maxLon}`);
     const data = await res.json();
-    if (data.error) { showError('Roads: ' + data.error); return; }
+    if (data.error) { return; }
     if (!data.features) return;
 
     if (roadsLayer) map.removeLayer(roadsLayer);
 
     const zoom = map.getZoom();
-    // Zoom-aware filtering: fewer road types at low zoom
-    const major = { motorway: '#ff6600', trunk: '#dd4400', primary: '#ff9900',
-                    secondary: '#ffcc00', tertiary: '#ffff66' };
+    const major = { motorway: '#ff6600', trunk: '#dd4400', primary: '#ff9900', secondary: '#ffcc00', tertiary: '#ffff66' };
     const minor = { residential: '#88aaff', service: '#6688cc' };
-
-    // Skip footways, paths, cycleways, pedestrian, track everywhere
     const skipClasses = ['footway', 'path', 'cycleway', 'pedestrian', 'track'];
-    // At low zoom, also skip minor roads
     const skipMinor = zoom < 13;
-    // At very low zoom, skip tertiary too
     const skipTertiary = zoom < 11;
 
-    const segments = [];
+    const segs = [];
     for (const f of data.features) {
       const cls = (f.properties.road_class || '').toLowerCase();
       if (skipClasses.includes(cls)) continue;
       if (skipMinor && !major[cls]) continue;
       if (skipTertiary && !['motorway', 'trunk', 'primary'].includes(cls)) continue;
-
       const coords = f.geometry.coordinates.map(c => [c[1], c[0]]);
       const color = major[cls] || minor[cls] || '#666688';
       const weight = major[cls] ? 2.5 : 1.5;
-      segments.push(L.polyline(coords, { color, weight, opacity: 0.6 }));
+      segs.push(L.polyline(coords, { color, weight, opacity: 0.5 }));
     }
-
-    roadsLayer = L.layerGroup(segments).addTo(map);
-  } catch(e) {
-    showError('Roads fetch failed');
-  }
+    roadsLayer = L.layerGroup(segs).addTo(map);
+  } catch(e) {}
 }
 
 // --- Buildings layer ---
@@ -240,12 +276,10 @@ function toggleBuildingsLayer() {
   const btn = document.getElementById('btn-buildings');
   buildingsVisible = !buildingsVisible;
   if (buildingsVisible) {
-    btn.textContent = 'Hide Buildings';
     btn.classList.add('active');
     loadBuildingsForViewport();
     map.on('moveend', onMapMoveEndBuildings);
   } else {
-    btn.textContent = 'Show Buildings';
     btn.classList.remove('active');
     map.off('moveend', onMapMoveEndBuildings);
     if (buildingsLayer) { map.removeLayer(buildingsLayer); buildingsLayer = null; }
@@ -262,65 +296,55 @@ async function loadBuildingsForViewport() {
   const b = map.getBounds();
   const minLat = b.getSouth(), minLon = b.getWest();
   const maxLat = b.getNorth(), maxLon = b.getEast();
-  const spanLat = maxLat - minLat;
-  const spanLon = maxLon - minLon;
-  if (spanLat > 0.05 || spanLon > 0.05) return; // only load when zoomed in
+  const span = maxLat - minLat;
+  if (span > 0.05) return;
 
   try {
     const res = await fetch(`/api/buildings-bounds?min_lat=${minLat}&min_lon=${minLon}&max_lat=${maxLat}&max_lon=${maxLon}`);
     const data = await res.json();
-    if (data.error) { showError('Buildings: ' + data.error); return; }
-    if (!data.features) return;
+    if (data.error || !data.features) return;
 
     if (buildingsLayer) map.removeLayer(buildingsLayer);
-
     const polys = [];
     for (const f of data.features) {
       const ring = f.geometry.coordinates[0].map(c => [c[1], c[0]]);
       const name = f.properties.name || '';
       const type = f.properties.building_type || '';
-      const poly = L.polygon(ring, { color: '#ffaa44', weight: 1, opacity: 0.7, fillOpacity: 0.2 });
-      if (name) poly.bindPopup(`<b>${name}</b><br>${type}`);
+      const poly = L.polygon(ring, { color: '#ffaa44', weight: 1, opacity: 0.7, fillOpacity: 0.15 });
+      if (name) poly.bindPopup(`<div class="popup-title">${name}</div><div class="popup-meta">${type}</div>`);
       polys.push(poly);
     }
     buildingsLayer = L.layerGroup(polys).addTo(map);
-  } catch(e) {
-    showError('Buildings fetch failed');
-  }
+  } catch(e) {}
 }
 
 // --- Routing ---
 async function route() {
   const origin = parseLatLon(document.getElementById('origin-input').value);
   const dest = parseLatLon(document.getElementById('dest-input').value);
-  if (!origin || !dest) { showError('Invalid coordinates'); return; }
+  if (!origin || !dest) { showToast('Invalid coordinates'); return; }
 
-  // Clear old routes
   if (ptilesLayer) { map.removeLayer(ptilesLayer); ptilesLayer = null; }
   if (osrmLayer) { map.removeLayer(osrmLayer); osrmLayer = null; }
   if (searchMarker) { map.removeLayer(searchMarker); searchMarker = null; }
 
-  // Mark points
-  L.circleMarker([origin[0], origin[1]], { color: '#00ff88', radius: 6 }).addTo(map);
-  L.circleMarker([dest[0], dest[1]], { color: '#ff4488', radius: 6 }).addTo(map);
+  L.circleMarker([origin[0], origin[1]], { color: '#4ade80', radius: 6, fillOpacity: 0.8 }).addTo(map);
+  L.circleMarker([dest[0], dest[1]], { color: '#f87171', radius: 6, fillOpacity: 0.8 }).addTo(map);
   map.fitBounds([[origin[0], origin[1]], [dest[0], dest[1]]], { padding: [50, 50] });
 
-  // Query both
   const profile = document.getElementById('profile-select').value;
   const [ptilesRes, osrmRes] = await Promise.all([
     fetch(`/api/route?lat1=${origin[0]}&lon1=${origin[1]}&lat2=${dest[0]}&lon2=${dest[1]}&profile=${profile}`).then(r => r.json()),
     fetch(`/api/route-osrm?lat1=${origin[0]}&lon1=${origin[1]}&lat2=${dest[0]}&lon2=${dest[1]}`).then(r => r.json()),
   ]);
 
-  if (ptilesRes.error) { showError('ptiles: ' + ptilesRes.error); }
-  if (osrmRes.error) { showError('OSRM: ' + osrmRes.error); }
+  if (ptilesRes.error) showToast('ptiles: ' + ptilesRes.error);
+  if (osrmRes.error) showToast('OSRM: ' + osrmRes.error);
 
   ptilesLayer = drawRoute(ptilesRes, '#e94560', 'ptiles');
   osrmLayer = drawRoute(osrmRes, '#4488ff', 'OSRM');
-
   updateStats(ptilesRes, osrmRes);
 
-  // Log for copy-paste
   const logEl = document.getElementById('route-log');
   const ptilesOk = ptilesRes.distance_meters ? 'OK' : ('ERR: ' + (ptilesRes.error || 'no data'));
   const osrmOk = osrmRes.distance_meters ? 'OK' : ('ERR: ' + (osrmRes.error || 'no data'));
@@ -349,28 +373,17 @@ async function randomRoute() {
 
 function toggleAutoRandom() {
   const checked = document.getElementById('auto-random').checked;
-  if (checked) {
-    autoTimer = setInterval(randomRoute, 3000);
-    randomRoute();
-  } else {
-    clearInterval(autoTimer);
-    autoTimer = null;
-  }
+  if (checked) { autoTimer = setInterval(randomRoute, 3000); randomRoute(); }
+  else { clearInterval(autoTimer); autoTimer = null; }
 }
 
-
-// Click to set origin + highlight nearest building
+// --- Click: set origin + highlight nearest building ---
 map.on('click', async (e) => {
   const { lat, lng } = e.latlng;
   document.getElementById('origin-input').value = `${lat.toFixed(4)},${lng.toFixed(4)}`;
 
-  // Remove previous highlight
-  if (clickBuildingHighlight) {
-    map.removeLayer(clickBuildingHighlight);
-    clickBuildingHighlight = null;
-  }
+  if (clickBuildingHighlight) { map.removeLayer(clickBuildingHighlight); clickBuildingHighlight = null; }
 
-  // Query nearest building outline
   try {
     const res = await fetch(`/api/buildings?lat=${lat}&lon=${lng}`);
     const data = await res.json();
@@ -380,24 +393,31 @@ map.on('click', async (e) => {
       const name = f.properties.name || '';
       const type = f.properties.building_type || '';
       clickBuildingHighlight = L.polygon(ring, {
-        color: '#22ff88',
-        weight: 3,
-        opacity: 1,
-        fillOpacity: 0.3,
-        fillColor: '#22ff88'
+        color: '#4ade80', weight: 3, opacity: 1, fillOpacity: 0.25, fillColor: '#4ade80'
       }).addTo(map);
-      clickBuildingHighlight.bindPopup(`<div class="building-popup"><strong>${name || type || 'Building'}</strong>${name ? '<br>' + type : ''}<br><span style="color:#888;font-size:11px;">osm: ${f.properties.osm_id}</span></div>`);
+      clickBuildingHighlight.bindPopup(`
+        <div class="popup-title">${name || type || 'Building'}</div>
+        ${name ? `<div class="popup-meta">${type}</div>` : ''}
+        <div class="popup-label" style="margin-top:4px">osm ${f.properties.osm_id}</div>
+      `);
       clickBuildingHighlight.openPopup();
     } else {
-      L.popup()
-        .setLatLng([lat, lng])
-        .setContent('<div class="building-popup">No building found nearby</div>')
+      L.popup().setLatLng([lat, lng])
+        .setContent('<div style="color:#666;font-size:11px">No building found</div>')
         .openOn(map);
     }
-  } catch(e) {
-    // silent
-  }
+  } catch(e) {}
 });
+
+// --- Legend control for route overlay ---
+L.control({position: 'bottomleft'}).onAdd = () => {
+  const div = L.DomUtil.create('div', 'legend');
+  div.innerHTML = `
+    <div class="legend-item"><span class="legend-swatch ptiles"></span>ptiles</div>
+    <div class="legend-item"><span class="legend-swatch osrm"></span>OSRM</div>
+  `;
+  return div;
+}.addTo(map);
 
 // Initial route
 route();

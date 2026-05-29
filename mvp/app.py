@@ -8,7 +8,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 STATES_DIR = Path("/home/aoi/kino/projects/ptiles/data/states")
 BUILDINGS_PATH = Path("/home/aoi/kino/projects/ptiles/data/states/TN.buildings_v8.ptiles")
-PTILES_CLI = Path("/home/aoi/kino/projects/timeline/target/debug/ptiles")
+PTILES_CLI = Path("/tmp/ptiles-target/debug/ptiles")
 OSRM_BASE = "https://routing.openstreetmap.de/routed-car/route/v1/driving"
 PORT = 9352
 
@@ -152,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
         # Clamp to reasonable viewport to avoid giant responses
         span_lat = max_lat - min_lat
         span_lon = max_lon - min_lon
-        if span_lat > 10.0 or span_lon > 10.0:
+        if span_lat > 30.0 or span_lon > 30.0:
             return self.json_response({"error": "Bounds too large, zoom in"}, 400)
 
         roads_path = str(STATES_DIR)
@@ -214,17 +214,53 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response({"error": f"ptiles bounds parse error: {e}"}, 500)
 
     def get_buildings(self, qs):
+        """Return the single nearest building at (lat, lon) as a GeoJSON Feature."""
         lat = self.get_param(qs, "lat")
         lon = self.get_param(qs, "lon")
         if lat is None or lon is None:
-            return self.json_response({"buildings": []})
-        # Reuse buildings_bounds with a small radius around the click point
-        r = 0.003  # ~300m radius
-        qs["min_lat"] = str(lat - r)
-        qs["min_lon"] = str(lon - r)
-        qs["max_lat"] = str(lat + r)
-        qs["max_lon"] = str(lon + r)
-        self.buildings_bounds(qs)
+            return self.json_response({"nearest": None, "error": "Missing coords"}, 400)
+
+        if not BUILDINGS_PATH.exists():
+            return self.json_response({"nearest": None, "error": "Buildings file not found"}, 404)
+
+        r = 0.003  # ~300m search radius
+        try:
+            res = subprocess.run(
+                [str(PTILES_CLI), str(BUILDINGS_PATH), "bounds",
+                 str(lat - r), str(lon - r), str(lat + r), str(lon + r), "--json"],
+                capture_output=True, text=True, timeout=30
+            )
+            if res.returncode != 0:
+                return self.json_response({"nearest": None, "error": res.stderr or "ptiles failed"}, 500)
+
+            lines = res.stdout.strip().split("\n")
+            json_str = "\n".join(lines[6:]) if len(lines) > 6 else lines[-1]
+            data = json.loads(json_str)
+            features = data.get("features", [])
+
+            if not features:
+                return self.json_response({"nearest": None})
+
+            # Find nearest by centroid distance
+            best = None
+            best_dist = float("inf")
+            for f in features:
+                coords = f.get("geometry", {}).get("coordinates", [[]])[0]
+                if not coords:
+                    continue
+                # centroid of polygon
+                cx = sum(c[0] for c in coords) / len(coords)
+                cy = sum(c[1] for c in coords) / len(coords)
+                d = (cx - lon) ** 2 + (cy - lat) ** 2
+                if d < best_dist:
+                    best_dist = d
+                    best = f
+
+            self.json_response({"nearest": best})
+        except subprocess.TimeoutExpired:
+            self.json_response({"nearest": None, "error": "ptiles timed out"}, 504)
+        except (json.JSONDecodeError, IndexError) as e:
+            self.json_response({"nearest": None, "error": f"ptiles parse error: {e}"}, 500)
 
     def log_message(self, format, *args):
         print(f"[{self.address_string()}] {args[0] if args else ''}")

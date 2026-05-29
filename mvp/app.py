@@ -7,13 +7,53 @@ from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 STATES_DIR = Path("/home/aoi/kino/projects/ptiles/data/states")
-BUILDINGS_PATH = Path("/home/aoi/kino/projects/ptiles/data/states/TN.buildings_v8.ptiles")
 PTILES_CLI = Path("/tmp/ptiles-target/debug/ptiles")
 OSRM_BASE = "https://routing.openstreetmap.de/routed-car/route/v1/driving"
 PORT = 9352
 
+# State bounding boxes (min_lon, min_lat, max_lon, max_lat) for building file lookup.
+STATE_BBOXES = {
+    "AL": (-88.5, 30.0, -84.9, 35.0), "AR": (-94.6, 33.0, -89.0, 36.5),
+    "AZ": (-115.0, 31.3, -109.0, 37.0), "CA": (-124.5, 32.5, -114.1, 42.0),
+    "CO": (-109.1, 37.0, -102.0, 41.0), "CT": (-73.7, 40.9, -71.8, 42.1),
+    "DC": (-77.2, 38.8, -76.9, 39.0), "DE": (-75.8, 38.4, -75.0, 39.9),
+    "FL": (-87.6, 24.4, -80.0, 31.0), "GA": (-85.6, 30.0, -78.4, 35.0),
+    "IA": (-96.6, 40.4, -90.1, 43.5), "ID": (-117.0, 42.0, -111.0, 49.0),
+    "IL": (-91.5, 36.9, -87.0, 42.5), "IN": (-88.1, 37.8, -84.8, 41.8),
+    "KS": (-102.1, 37.0, -94.6, 40.0), "KY": (-89.6, 36.5, -82.0, 39.2),
+    "LA": (-94.1, 28.9, -88.8, 33.0), "MA": (-73.5, 41.2, -69.9, 42.9),
+    "MD": (-79.5, 37.9, -75.0, 39.8), "ME": (-71.1, 43.0, -66.9, 47.5),
+    "MI": (-90.4, 41.7, -82.4, 48.3), "MN": (-97.3, 43.5, -89.5, 49.4),
+    "MO": (-95.8, 35.9, -89.1, 40.6), "MS": (-91.7, 30.0, -88.1, 35.0),
+    "MT": (-116.1, 44.4, -104.0, 49.0), "NC": (-84.3, 33.8, -75.4, 36.6),
+    "ND": (-104.1, 45.9, -96.5, 49.0), "NE": (-104.1, 40.0, -95.3, 43.0),
+    "NH": (-72.6, 42.7, -70.6, 45.3), "NJ": (-75.6, 38.9, -73.9, 41.4),
+    "NM": (-109.1, 31.3, -103.0, 37.0), "NV": (-120.0, 35.0, -114.0, 42.0),
+    "NY": (-79.8, 40.5, -71.8, 45.0), "OH": (-84.8, 38.4, -80.5, 41.7),
+    "OK": (-103.0, 33.6, -94.4, 37.0), "OR": (-124.6, 41.9, -116.5, 46.3),
+    "PA": (-80.5, 39.7, -74.7, 42.3), "RI": (-71.9, 41.1, -71.1, 42.0),
+    "SC": (-83.4, 32.0, -78.5, 35.2), "SD": (-104.1, 42.5, -96.4, 45.9),
+    "TN": (-90.3, 34.9, -81.6, 36.7), "TX": (-106.7, 25.8, -93.5, 36.5),
+    "UT": (-114.1, 37.0, -109.0, 42.0), "VA": (-83.7, 36.5, -75.2, 39.5),
+    "VT": (-73.5, 42.7, -71.5, 45.0), "WA": (-124.8, 45.5, -116.9, 49.0),
+    "WI": (-93.0, 42.5, -86.8, 47.3), "WV": (-82.7, 37.2, -77.7, 40.6),
+    "WY": (-111.1, 41.0, -104.0, 45.0),
+}
+
 # US-wide random route zone
 US_ROAD_ZONE = {"min_lat": 25.0, "max_lat": 49.0, "min_lon": -125.0, "max_lon": -67.0}
+
+def find_state(lat, lon):
+    """Return the state abbreviation that contains (lat, lon), or None."""
+    for abbr, (min_lon, min_lat, max_lon, max_lat) in STATE_BBOXES.items():
+        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
+            return abbr
+    return None
+
+def state_buildings_path(abbr):
+    """Return path to a state's buildings file if it exists."""
+    p = STATES_DIR / f"{abbr}.buildings_v8.ptiles"
+    return p if p.exists() else None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -192,12 +232,18 @@ class Handler(BaseHTTPRequestHandler):
         if span_lat > 2.0 or span_lon > 2.0:
             return self.json_response({"error": "Bounds too large, zoom in"}, 400)
 
-        if not BUILDINGS_PATH.exists():
-            return self.json_response({"error": "Buildings file not found"}, 404)
+        mid_lat = (min_lat + max_lat) / 2.0
+        mid_lon = (min_lon + max_lon) / 2.0
+        abbr = find_state(mid_lat, mid_lon)
+        if not abbr:
+            return self.json_response({"error": "No buildings for this region"}, 404)
+        bpath = state_buildings_path(abbr)
+        if not bpath:
+            return self.json_response({"error": f"No buildings file for {abbr}"}, 404)
 
         try:
             res = subprocess.run(
-                [str(PTILES_CLI), str(BUILDINGS_PATH), "bounds",
+                [str(PTILES_CLI), str(bpath), "bounds",
                  str(min_lat), str(min_lon), str(max_lat), str(max_lon), "--json"],
                 capture_output=True, text=True, timeout=30
             )
@@ -220,13 +266,17 @@ class Handler(BaseHTTPRequestHandler):
         if lat is None or lon is None:
             return self.json_response({"nearest": None, "error": "Missing coords"}, 400)
 
-        if not BUILDINGS_PATH.exists():
-            return self.json_response({"nearest": None, "error": "Buildings file not found"}, 404)
+        abbr = find_state(lat, lon)
+        if not abbr:
+            return self.json_response({"nearest": None, "error": "No buildings for this region"}, 404)
+        bpath = state_buildings_path(abbr)
+        if not bpath:
+            return self.json_response({"nearest": None, "error": f"No buildings file for {abbr}"}, 404)
 
         r = 0.003  # ~300m search radius
         try:
             res = subprocess.run(
-                [str(PTILES_CLI), str(BUILDINGS_PATH), "bounds",
+                [str(PTILES_CLI), str(bpath), "bounds",
                  str(lat - r), str(lon - r), str(lat + r), str(lon + r), "--json"],
                 capture_output=True, text=True, timeout=30
             )

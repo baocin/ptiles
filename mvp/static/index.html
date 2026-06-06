@@ -48,6 +48,19 @@ select:focus{border-color:#3b3b5c}
 .popup-meta{color:#666;font-size:10px;margin-top:2px}
 .popup-label{color:#555;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1a1a28;color:#c8c8d0;padding:8px 20px;border-radius:6px;font-size:12px;z-index:10000;display:none;border:1px solid #2a2a3e;box-shadow:0 4px 12px rgba(0,0,0,.4)}
+#sidebar{position:fixed;top:44px;right:0;width:340px;max-height:calc(100vh - 44px);background:#0f0f17;border-left:1px solid #1a1a28;z-index:2000;display:none;flex-direction:column;overflow:hidden}
+#sidebar-header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #1a1a28;background:#141420}
+#sidebar-title{font-size:12px;font-weight:600;color:#e8e8f0}
+#sidebar-close{background:none;border:none;color:#555;font-size:18px;cursor:pointer;line-height:1;padding:0 4px}
+#sidebar-close:hover{color:#c8c8d0}
+#sidebar-body{padding:14px;overflow-y:auto;flex:1;font-size:11px;line-height:1.6}
+#sidebar-body .field{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #141420}
+#sidebar-body .field-label{color:#555;text-transform:uppercase;letter-spacing:.5px;font-size:10px}
+#sidebar-body .field-value{color:#c8c8d0;text-align:right;max-width:220px;word-break:break-all}
+#sidebar-body .field-value.null{color:#333}
+.sidebar-section-title{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.8px;margin:12px 0 6px;padding-top:8px;border-top:1px solid #1a1a28}
+.map-sidebar-open #map{margin-right:340px}
+@media(max-width:900px){#sidebar{width:100%;max-height:50vh;top:auto;bottom:0}.map-sidebar-open #map{margin-right:0}}
 .legend{background:rgba(15,15,23,.92)!important;border:1px solid #1a1a28!important;border-radius:6px!important;padding:8px 12px!important;font-size:11px!important;color:#c8c8d0!important;line-height:1.6!important}
 .legend-item{display:flex;align-items:center;gap:8px}
 .legend-swatch{width:20px;height:3px;border-radius:2px}
@@ -94,7 +107,17 @@ select:focus{border-color:#3b3b5c}
   <div class="section">
     <button class="btn btn-sm" id="btn-roads" onclick="toggleRoadsLayer()">Roads</button>
     <button class="btn btn-sm" id="btn-buildings" onclick="toggleBuildingsLayer()">Buildings</button>
-    <button class="btn btn-sm" id="btn-basemap" onclick="toggleBasemap()">OSM</button>
+    <select id="basemap-select" onchange="setBasemap(this.value)">
+      <option value="osm">OSM / Roads</option>
+      <option value="osm-roads">OSM + Roads</option>
+      <option value="osm-buildings">OSM + Buildings</option>
+      <option value="freemap">FreeMap only</option>
+      <option value="freemap-roads">FreeMap + Roads</option>
+      <option value="freemap-buildings">FreeMap + Buildings</option>
+      <option value="dark">Dark only</option>
+      <option value="dark-roads">Dark + Roads</option>
+      <option value="dark-buildings">Dark + Buildings</option>
+    </select>
     <button class="btn btn-sm" id="btn-log" onclick="toggleLog()" style="color:#555">Log</button>
   </div>
 
@@ -106,6 +129,13 @@ select:focus{border-color:#3b3b5c}
 </div>
 
 <div id="map"></div>
+<div id="sidebar">
+  <div id="sidebar-header">
+    <span id="sidebar-title">Building Details</span>
+    <button id="sidebar-close" onclick="closeSidebar()">&times;</button>
+  </div>
+  <div id="sidebar-body"></div>
+</div>
 <div id="toast"></div>
 
 <script>
@@ -118,16 +148,49 @@ const osmTile = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
 const freeMapTile = L.tileLayer('https://tiles.openfreemap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenFreeMap', maxZoom: 19
 });
-let currentBasemap = 'osm';
 osmTile.addTo(map);
 
 // --- State ---
 let ptilesLayer = null, osrmLayer = null, autoTimer = null, searchMarker = null;
 let roadsLayer = null, roadsVisible = false, roadsTimer = null;
-let buildingsLayer = null, buildingsVisible = false, buildingsTimer = null;
+let buildingsLayer = null, buildingsTimer = null;
 let clickBuildingHighlight = null;
 let toastTimer = null;
 let roadLegend = null;
+let routeOriginMarker = null, routeDestMarker = null;
+let clickPhase = 'origin'; // 'origin' | 'dest' | 'done'
+
+// --- Basemap management ---
+const darkTile = L.tileLayer('', { maxZoom: 19 });
+let activeBase = 'osm';
+function clearBase() {
+  if (map.hasLayer(osmTile)) map.removeLayer(osmTile);
+  if (map.hasLayer(freeMapTile)) map.removeLayer(freeMapTile);
+  if (map.hasLayer(darkTile)) map.removeLayer(darkTile);
+}
+function setBasemap(val) {
+  clearBase();
+  const [base, overlay] = val.split('-');
+  activeBase = base;
+  if (base === 'osm') osmTile.addTo(map);
+  else if (base === 'freemap') freeMapTile.addTo(map);
+  else darkTile.addTo(map); // dark only (no tile layer = dark background)
+
+  // Auto-toggle overlays matching the preset
+  const wantsRoads = overlay === 'roads';
+  const wantsBldgs = overlay === 'buildings';
+  setLayer('roads', wantsRoads);
+  setLayer('buildings', wantsBldgs);
+}
+function setLayer(name, on) {
+  if (name === 'roads') {
+    if (on && !roadsVisible) toggleRoadsLayer();
+    else if (!on && roadsVisible) toggleRoadsLayer();
+  } else if (name === 'buildings') {
+    if (on && buildingMode === BLDG_MODE.OFF) toggleBuildingsLayer();
+    else if (!on && buildingMode !== BLDG_MODE.OFF) toggleBuildingsLayer();
+  }
+}
 
 function showToast(msg) {
   const el = document.getElementById('toast');
@@ -179,17 +242,56 @@ function drawRoute(data, color, label) {
   return polyline;
 }
 
-// --- Basemap toggle ---
-function toggleBasemap() {
-  const btn = document.getElementById('btn-basemap');
-  if (currentBasemap === 'osm') {
-    map.removeLayer(osmTile); freeMapTile.addTo(map);
-    currentBasemap = 'freemap'; btn.textContent = 'FreeMap';
+// --- Click: set origin + dest by clicking map ---
+map.on('click', async (e) => {
+  const { lat, lng } = e.latlng;
+
+  if (clickPhase === 'origin') {
+    // First click: set origin
+    document.getElementById('origin-input').value = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+    if (routeOriginMarker) map.removeLayer(routeOriginMarker);
+    routeOriginMarker = L.circleMarker([lat, lng], { color: '#4ade80', radius: 7, fillOpacity: 0.9 }).addTo(map);
+    routeOriginMarker.bindPopup('<div class="popup-title">Origin</div>').openPopup();
+    clickPhase = 'dest';
+    showToast('Click destination on map');
+  } else if (clickPhase === 'dest') {
+    // Second click: set dest and route
+    document.getElementById('dest-input').value = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+    if (routeDestMarker) map.removeLayer(routeDestMarker);
+    routeDestMarker = L.circleMarker([lat, lng], { color: '#f87171', radius: 7, fillOpacity: 0.9 }).addTo(map);
+    routeDestMarker.bindPopup('<div class="popup-title">Destination</div>').openPopup();
+    clickPhase = 'done';
+    // Highlight nearest building at dest
+    try {
+      const res = await fetch(`/api/buildings?lat=${lat}&lon=${lng}`);
+      const data = await res.json();
+      if (data.nearest) {
+        const f = data.nearest;
+        const ring = f.geometry.coordinates[0].map(c => [c[1], c[0]]);
+        clickBuildingHighlight = L.polygon(ring, { color: '#4ade80', weight: 2, opacity: 0.8, fillOpacity: 0.15 }).addTo(map);
+        showBuildingSidebar(f);
+      } else { closeSidebar(); }
+    } catch(e) {}
+    route();
   } else {
-    map.removeLayer(freeMapTile); osmTile.addTo(map);
-    currentBasemap = 'osm'; btn.textContent = 'OSM';
+    // Reset: start new origin
+    if (routeOriginMarker) map.removeLayer(routeOriginMarker);
+    if (routeDestMarker) map.removeLayer(routeDestMarker);
+    routeOriginMarker = null; routeDestMarker = null;
+    document.getElementById('origin-input').value = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+    routeOriginMarker = L.circleMarker([lat, lng], { color: '#4ade80', radius: 7, fillOpacity: 0.9 }).addTo(map);
+    routeOriginMarker.bindPopup('<div class="popup-title">Origin</div>').openPopup();
+    clickPhase = 'dest';
+    showToast('Click destination on map');
   }
-}
+
+  if (clickBuildingHighlight) { map.removeLayer(clickBuildingHighlight); clickBuildingHighlight = null; }
+  closeSidebar();
+});
+
+// Re-route on enter in either input
+document.getElementById('origin-input').addEventListener('keydown', e => { if (e.key === 'Enter') route(); });
+document.getElementById('dest-input').addEventListener('keydown', e => { if (e.key === 'Enter') route(); });
 
 function toggleLog() {
   const bar = document.getElementById('log-bar');
@@ -271,18 +373,22 @@ async function loadRoadsForViewport() {
   } catch(e) {}
 }
 
-// --- Buildings layer ---
+// --- Buildings layer: cycles off → filled → outlines → off ---
+const BLDG_MODE = { OFF: 0, FILLED: 1, OUTLINE: 2 };
+let buildingMode = BLDG_MODE.OFF;
 function toggleBuildingsLayer() {
   const btn = document.getElementById('btn-buildings');
-  buildingsVisible = !buildingsVisible;
-  if (buildingsVisible) {
-    btn.classList.add('active');
-    loadBuildingsForViewport();
-    map.on('moveend', onMapMoveEndBuildings);
-  } else {
+  buildingMode = (buildingMode + 1) % 3;
+  if (buildingMode === BLDG_MODE.OFF) {
     btn.classList.remove('active');
+    btn.textContent = 'Buildings';
     map.off('moveend', onMapMoveEndBuildings);
     if (buildingsLayer) { map.removeLayer(buildingsLayer); buildingsLayer = null; }
+  } else {
+    btn.classList.add('active');
+    btn.textContent = buildingMode === BLDG_MODE.FILLED ? 'Buildings' : 'Outlines';
+    loadBuildingsForViewport();
+    map.on('moveend', onMapMoveEndBuildings);
   }
 }
 
@@ -292,12 +398,12 @@ function onMapMoveEndBuildings() {
 }
 
 async function loadBuildingsForViewport() {
-  if (!buildingsVisible) return;
+  if (buildingMode === BLDG_MODE.OFF) return;
   const b = map.getBounds();
   const minLat = b.getSouth(), minLon = b.getWest();
   const maxLat = b.getNorth(), maxLon = b.getEast();
   const span = maxLat - minLat;
-  if (span > 0.05) return;
+  if (span > 0.15) return;
 
   try {
     const res = await fetch(`/api/buildings-bounds?min_lat=${minLat}&min_lon=${minLon}&max_lat=${maxLat}&max_lon=${maxLon}`);
@@ -305,13 +411,17 @@ async function loadBuildingsForViewport() {
     if (data.error || !data.features) return;
 
     if (buildingsLayer) map.removeLayer(buildingsLayer);
+    const isOutline = buildingMode === BLDG_MODE.OUTLINE;
     const polys = [];
     for (const f of data.features) {
       const ring = f.geometry.coordinates[0].map(c => [c[1], c[0]]);
       const name = f.properties.name || '';
       const type = f.properties.building_type || '';
-      const poly = L.polygon(ring, { color: '#ffaa44', weight: 1, opacity: 0.7, fillOpacity: 0.15 });
-      if (name) poly.bindPopup(`<div class="popup-title">${name}</div><div class="popup-meta">${type}</div>`);
+      const poly = L.polygon(ring, isOutline
+        ? { color: '#ffffff', weight: 0.5, opacity: 0.3, fillOpacity: 0 }
+        : { color: '#ffaa44', weight: 1, opacity: 0.7, fillOpacity: 0.15 }
+      );
+      if (name && !isOutline) poly.bindPopup(`<div class="popup-title">${name}</div><div class="popup-meta">${type}</div>`);
       polys.push(poly);
     }
     buildingsLayer = L.layerGroup(polys).addTo(map);
@@ -377,47 +487,51 @@ function toggleAutoRandom() {
   else { clearInterval(autoTimer); autoTimer = null; }
 }
 
-// --- Click: set origin + highlight nearest building ---
-map.on('click', async (e) => {
-  const { lat, lng } = e.latlng;
-  document.getElementById('origin-input').value = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+// --- Building sidebar ---
+function closeSidebar() {
+  document.getElementById('sidebar').style.display = 'none';
+  document.body.classList.remove('map-sidebar-open');
+}
 
-  if (clickBuildingHighlight) { map.removeLayer(clickBuildingHighlight); clickBuildingHighlight = null; }
+function showBuildingSidebar(f) {
+  const props = f.properties || {};
+  const coords = f.geometry && f.geometry.coordinates && f.geometry.coordinates[0] || [];
+  const cx = coords.reduce((s, c) => s + c[0], 0) / (coords.length || 1);
+  const cy = coords.reduce((s, c) => s + c[1], 0) / (coords.length || 1);
+  const centroid = props.centroid || [cx, cy];
 
-  try {
-    const res = await fetch(`/api/buildings?lat=${lat}&lon=${lng}`);
-    const data = await res.json();
-    if (data.nearest) {
-      const f = data.nearest;
-      const ring = f.geometry.coordinates[0].map(c => [c[1], c[0]]);
-      const name = f.properties.name || '';
-      const type = f.properties.building_type || '';
-      clickBuildingHighlight = L.polygon(ring, {
-        color: '#4ade80', weight: 3, opacity: 1, fillOpacity: 0.25, fillColor: '#4ade80'
-      }).addTo(map);
-      clickBuildingHighlight.bindPopup(`
-        <div class="popup-title">${name || type || 'Building'}</div>
-        ${name ? `<div class="popup-meta">${type}</div>` : ''}
-        <div class="popup-label" style="margin-top:4px">osm ${f.properties.osm_id}</div>
-      `);
-      clickBuildingHighlight.openPopup();
-    } else {
-      L.popup().setLatLng([lat, lng])
-        .setContent('<div style="color:#666;font-size:11px">No building found</div>')
-        .openOn(map);
-    }
-  } catch(e) {}
-});
+  const fields = [
+    { label: 'Name', value: props.name },
+    { label: 'OSM ID', value: props.osm_id },
+    { label: 'Type', value: props.building_type },
+    { label: 'Category', value: props.category },
+    { label: 'Name Source', value: props.name_source },
+    { label: 'POI OSM ID', value: props.poi_osm_id },
+    { label: 'Vertices', value: coords.length },
+    { label: 'Centroid', value: `(${centroid[1].toFixed(5)}, ${centroid[0].toFixed(5)})` },
+  ];
+
+  const html = fields.map(f =>
+    `<div class="field"><span class="field-label">${f.label}</span><span class="field-value${f.value == null ? ' null' : ''}">${f.value != null ? f.value : '\u2014'}</span></div>`
+  ).join('');
+
+  document.getElementById('sidebar-body').innerHTML =
+    `<div class="sidebar-section-title">Building</div>${html}`;
+  document.getElementById('sidebar').style.display = 'flex';
+  document.body.classList.add('map-sidebar-open');
+}
 
 // --- Legend control for route overlay ---
-L.control({position: 'bottomleft'}).onAdd = () => {
+const legendCtrl = L.control({position: 'bottomleft'});
+legendCtrl.onAdd = () => {
   const div = L.DomUtil.create('div', 'legend');
   div.innerHTML = `
     <div class="legend-item"><span class="legend-swatch ptiles"></span>ptiles</div>
     <div class="legend-item"><span class="legend-swatch osrm"></span>OSRM</div>
   `;
   return div;
-}.addTo(map);
+};
+legendCtrl.addTo(map);
 
 // Initial route
 route();

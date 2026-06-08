@@ -231,9 +231,12 @@ function updateStats(ptiles, osrm) {
   el.innerHTML = html || '<span class="stat" style="color:#333">no route</span>';
 }
 
-function drawRoute(data, color, label) {
+function drawRoute(data, color, label, origin, dest) {
   if (!data || !data.path || data.path.length < 2) return null;
   const coords = data.path.map(p => [p[1], p[0]]);
+  // Prepend origin and append dest so the path connects to the markers visually
+  if (origin) coords.unshift([origin[0], origin[1]]);
+  if (dest) coords.push([dest[0], dest[1]]);
   const polyline = L.polyline(coords, { color, weight: 5, opacity: 0.75 }).addTo(map);
   polyline.bindPopup(`
     <div class="popup-title">${label}</div>
@@ -242,45 +245,22 @@ function drawRoute(data, color, label) {
   return polyline;
 }
 
-// --- Click: set origin + dest by clicking map ---
+// --- Click: set origin + dest by clicking map, then route ---
 map.on('click', async (e) => {
   const { lat, lng } = e.latlng;
 
   if (clickPhase === 'origin') {
-    // First click: set origin
     document.getElementById('origin-input').value = `${lat.toFixed(4)},${lng.toFixed(4)}`;
-    if (routeOriginMarker) map.removeLayer(routeOriginMarker);
-    routeOriginMarker = L.circleMarker([lat, lng], { color: '#4ade80', radius: 7, fillOpacity: 0.9 }).addTo(map);
-    routeOriginMarker.bindPopup('<div class="popup-title">Origin</div>').openPopup();
     clickPhase = 'dest';
     showToast('Click destination on map');
   } else if (clickPhase === 'dest') {
-    // Second click: set dest and route
     document.getElementById('dest-input').value = `${lat.toFixed(4)},${lng.toFixed(4)}`;
-    if (routeDestMarker) map.removeLayer(routeDestMarker);
-    routeDestMarker = L.circleMarker([lat, lng], { color: '#f87171', radius: 7, fillOpacity: 0.9 }).addTo(map);
-    routeDestMarker.bindPopup('<div class="popup-title">Destination</div>').openPopup();
     clickPhase = 'done';
-    // Highlight nearest building at dest
-    try {
-      const res = await fetch(`/api/buildings?lat=${lat}&lon=${lng}`);
-      const data = await res.json();
-      if (data.nearest) {
-        const f = data.nearest;
-        const ring = f.geometry.coordinates[0].map(c => [c[1], c[0]]);
-        clickBuildingHighlight = L.polygon(ring, { color: '#4ade80', weight: 2, opacity: 0.8, fillOpacity: 0.15 }).addTo(map);
-        showBuildingSidebar(f);
-      } else { closeSidebar(); }
-    } catch(e) {}
     route();
   } else {
-    // Reset: start new origin
-    if (routeOriginMarker) map.removeLayer(routeOriginMarker);
-    if (routeDestMarker) map.removeLayer(routeDestMarker);
-    routeOriginMarker = null; routeDestMarker = null;
+    // Third+ click: set new origin, clear dest, trigger new route
     document.getElementById('origin-input').value = `${lat.toFixed(4)},${lng.toFixed(4)}`;
-    routeOriginMarker = L.circleMarker([lat, lng], { color: '#4ade80', radius: 7, fillOpacity: 0.9 }).addTo(map);
-    routeOriginMarker.bindPopup('<div class="popup-title">Origin</div>').openPopup();
+    document.getElementById('dest-input').value = '';
     clickPhase = 'dest';
     showToast('Click destination on map');
   }
@@ -434,12 +414,18 @@ async function route() {
   const dest = parseLatLon(document.getElementById('dest-input').value);
   if (!origin || !dest) { showToast('Invalid coordinates'); return; }
 
+  // Clear previous route, path, and markers
   if (ptilesLayer) { map.removeLayer(ptilesLayer); ptilesLayer = null; }
   if (osrmLayer) { map.removeLayer(osrmLayer); osrmLayer = null; }
   if (searchMarker) { map.removeLayer(searchMarker); searchMarker = null; }
+  if (routeOriginMarker) { map.removeLayer(routeOriginMarker); routeOriginMarker = null; }
+  if (routeDestMarker) { map.removeLayer(routeDestMarker); routeDestMarker = null; }
+  if (clickBuildingHighlight) { map.removeLayer(clickBuildingHighlight); clickBuildingHighlight = null; }
+  closeSidebar();
 
-  L.circleMarker([origin[0], origin[1]], { color: '#4ade80', radius: 6, fillOpacity: 0.8 }).addTo(map);
-  L.circleMarker([dest[0], dest[1]], { color: '#f87171', radius: 6, fillOpacity: 0.8 }).addTo(map);
+  // Draw origin and dest markers
+  routeOriginMarker = L.circleMarker([origin[0], origin[1]], { color: '#4ade80', radius: 7, fillOpacity: 0.9 }).addTo(map);
+  routeDestMarker = L.circleMarker([dest[0], dest[1]], { color: '#f87171', radius: 7, fillOpacity: 0.9 }).addTo(map);
   map.fitBounds([[origin[0], origin[1]], [dest[0], dest[1]]], { padding: [50, 50] });
 
   const profile = document.getElementById('profile-select').value;
@@ -451,8 +437,8 @@ async function route() {
   if (ptilesRes.error) showToast('ptiles: ' + ptilesRes.error);
   if (osrmRes.error) showToast('OSRM: ' + osrmRes.error);
 
-  ptilesLayer = drawRoute(ptilesRes, '#e94560', 'ptiles');
-  osrmLayer = drawRoute(osrmRes, '#4488ff', 'OSRM');
+  ptilesLayer = drawRoute(ptilesRes, '#e94560', 'ptiles', origin, dest);
+  osrmLayer = drawRoute(osrmRes, '#4488ff', 'OSRM', origin, dest);
   updateStats(ptilesRes, osrmRes);
 
   const logEl = document.getElementById('route-log');

@@ -12,9 +12,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from states import STATES  # type: ignore
 
 STATES_DIR = Path("/home/aoi/kino/projects/ptiles/data/states")
-PTILES_CLI = Path("/tmp/ptiles-target/debug/ptiles")
+PTILES_CLI = Path("/home/aoi/kino/projects/timeline/target/release/ptiles")
 OSRM_BASE = "https://routing.openstreetmap.de/routed-car/route/v1/driving"
 PORT = 9352
 

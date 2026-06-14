@@ -14,11 +14,10 @@ encode v8 blocks, write per-state PTILES files.
 """
 
 import sys
+
 sys.stdout.reconfigure(line_buffering=True)
 sys.path.insert(0, "/home/aoi/kino/projects/ptiles/scripts")
 
-import json
-import math
 import time
 import os
 from pathlib import Path
@@ -33,7 +32,7 @@ from states import STATES, get_state, state_bbox, State
 
 # --- Config ---
 OUTPUT_DIR = Path("/home/aoi/kino/projects/ptiles/data/states")
-PBF_PATH = "/home/aoi/data/ptiles-source/north-america-latest.osm.pbf"
+PBF_PATH = "/mnt/aoi/kino/ptiles/source/north-america-latest.osm.pbf"
 WORKER_POOL = os.cpu_count() or 8
 
 MAGIC = b"PTILESF\x00"
@@ -51,7 +50,7 @@ class BuildingHandler(osmium.SimpleHandler):
 
     def way(self, w):
         """Process a way (most building footprints are ways)."""
-        if not any(tag.k == 'building' for tag in w.tags if tag.v):
+        if not any(tag.k == "building" for tag in w.tags if tag.v):
             return
 
         # Check if the way's bbox overlaps our state bbox
@@ -64,8 +63,10 @@ class BuildingHandler(osmium.SimpleHandler):
                 loc_ok = True
             except Exception:
                 pass
-            if not loc_ok or not (self.min_lon <= c.lon <= self.max_lon and
-                    self.min_lat <= c.lat <= self.max_lat):
+            if not loc_ok or not (
+                self.min_lon <= c.lon <= self.max_lon
+                and self.min_lat <= c.lat <= self.max_lat
+            ):
                 return
 
         # Extract coordinates
@@ -80,14 +81,14 @@ class BuildingHandler(osmium.SimpleHandler):
         height_m = None
         name = ""
         for tag in w.tags:
-            if tag.k == 'building':
+            if tag.k == "building":
                 btype = tag.v
-            elif tag.k == 'height':
+            elif tag.k == "height":
                 try:
-                    height_m = float(tag.v.rstrip('m '))
+                    height_m = float(tag.v.rstrip("m "))
                 except (ValueError, AttributeError):
                     pass
-            elif tag.k == 'name':
+            elif tag.k == "name":
                 name = tag.v
 
         osm_id = w.id
@@ -98,13 +99,15 @@ class BuildingHandler(osmium.SimpleHandler):
         except Exception:
             return
 
-        self.buildings.append({
-            "osm_id": osm_id,
-            "coords": coords,
-            "building_type": btype,
-            "name": name,
-            "height_m": height_m,
-        })
+        self.buildings.append(
+            {
+                "osm_id": osm_id,
+                "coords": coords,
+                "building_type": btype,
+                "name": name,
+                "height_m": height_m,
+            }
+        )
 
     def relation(self, r):
         """Skip relations for now - most buildings are ways."""
@@ -113,7 +116,7 @@ class BuildingHandler(osmium.SimpleHandler):
 
 def extract_state_buildings(state: State) -> list[dict]:
     """Extract building footprints for a single state from OSM PBF."""
-    print(f"  Extracting from PBF...")
+    print("  Extracting from PBF...")
     handler = BuildingHandler(state_bbox(state))
     handler.apply_file(PBF_PATH)
 
@@ -137,10 +140,15 @@ def extract_state_buildings(state: State) -> list[dict]:
     return dict(per_cell)
 
 
-def write_ptiles_file(path: Path, buildings_by_cell: dict,
-                      min_lon: float, min_lat: float,
-                      max_lon: float, max_lat: float,
-                      compression_level: int = 3) -> int:
+def write_ptiles_file(
+    path: Path,
+    buildings_by_cell: dict,
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
+    compression_level: int = 3,
+) -> int:
     """Write a v8 PTILES file from per-cell building data."""
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -155,16 +163,20 @@ def write_ptiles_file(path: Path, buildings_by_cell: dict,
         for cell_hex in sorted(buildings_by_cell.keys()):
             blist = buildings_by_cell[cell_hex]
             cell_int = int(cell_hex, 16)
-            block_bytes, feat_count = encode_block_v8(blist, cell_hex, compression_level)
+            block_bytes, feat_count = encode_block_v8(
+                blist, cell_hex, compression_level
+            )
             if not block_bytes:
                 continue
             f.write(block_bytes)
-            index_entries.append({
-                "h3_cell": cell_int,
-                "block_offset": block_offset,
-                "block_length": len(block_bytes),
-                "feature_count": feat_count,
-            })
+            index_entries.append(
+                {
+                    "h3_cell": cell_int,
+                    "block_offset": block_offset,
+                    "block_length": len(block_bytes),
+                    "feature_count": feat_count,
+                }
+            )
             block_offset += len(block_bytes)
             total_features += feat_count
 
@@ -176,11 +188,19 @@ def write_ptiles_file(path: Path, buildings_by_cell: dict,
         blocks_offset = HEADER_SIZE
 
         write_header(
-            f, MAGIC, VERSION,
-            min_lat, min_lon, max_lat, max_lon,
-            total_features, len(index_entries),
-            dict_offset, dict_length,
-            index_offset, index_length,
+            f,
+            MAGIC,
+            VERSION,
+            min_lat,
+            min_lon,
+            max_lat,
+            max_lon,
+            total_features,
+            len(index_entries),
+            dict_offset,
+            dict_length,
+            index_offset,
+            index_length,
             blocks_offset,
         )
 
@@ -206,12 +226,15 @@ def build_state(state: State, dry_run: bool = False):
 
     if dry_run:
         print(f"  [dry-run] would write {total_buildings} buildings")
-        return {"abbr": state.abbr, "buildings": total_buildings, "cells": len(per_cell)}
+        return {
+            "abbr": state.abbr,
+            "buildings": total_buildings,
+            "cells": len(per_cell),
+        }
 
     bbox = state_bbox(state)
     size = write_ptiles_file(
-        OUTPUT_DIR / f"{state.abbr}.buildings_v8.ptiles",
-        per_cell, *bbox
+        OUTPUT_DIR / f"{state.abbr}.buildings_v8.ptiles", per_cell, *bbox
     )
 
     dt = time.time() - t0
@@ -227,6 +250,7 @@ def build_state(state: State, dry_run: bool = False):
 
 def main():
     import argparse
+
     p = argparse.ArgumentParser()
     p.add_argument("--states", help="Comma-separated state abbreviations (e.g. TN,CA)")
     p.add_argument("--all", action="store_true")
@@ -262,6 +286,7 @@ def main():
         except Exception as e:
             print(f"ERROR on {s.abbr}: {e}")
             import traceback
+
             traceback.print_exc()
 
     if results:
@@ -271,7 +296,9 @@ def main():
                 print(f"  {r['abbr']:2s} no buildings")
             else:
                 b = r.get("bytes", 0)
-                print(f"  {r['abbr']:2s} {r['buildings']:7d} bldgs  {r['cells']:4d} cells  {b:10,d} B  {r.get('time_s', 0):6.1f}s")
+                print(
+                    f"  {r['abbr']:2s} {r['buildings']:7d} bldgs  {r['cells']:4d} cells  {b:10,d} B  {r.get('time_s', 0):6.1f}s"
+                )
 
 
 if __name__ == "__main__":

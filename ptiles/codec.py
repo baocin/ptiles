@@ -585,13 +585,17 @@ def decode_coords_u16(
 
 
 def decode_index_entry_v2(data: bytes, pos: int) -> dict:
-    """Decode a 37-byte v2 spatial index entry."""
+    """Decode a 38-byte v2 spatial index entry."""
     h3_cell, min_lon, min_lat, max_lon, max_lat = struct.unpack_from(
         "<Qiiii", data, pos
     )
-    block_offset = int.from_bytes(data[pos + 24 : pos + 30], "little")
-    block_length = int.from_bytes(data[pos + 30 : pos + 33], "little")
-    feature_count, cell_index = struct.unpack_from("<HH", data, pos + 33)
+    off_lo = int.from_bytes(data[pos + 24 : pos + 30], "little")
+    len_lo = struct.unpack_from("<H", data, pos + 30)[0]
+    off_hi = data[pos + 32]
+    len_hi = data[pos + 33]
+    block_offset = off_lo | (off_hi << 48)
+    block_length = len_lo | (len_hi << 16)
+    feature_count, cell_index = struct.unpack_from("<HH", data, pos + 34)
     return {
         "h3_cell": h3_cell,
         "min_lon": min_lon,
@@ -603,6 +607,9 @@ def decode_index_entry_v2(data: bytes, pos: int) -> dict:
         "feature_count": feature_count,
         "cell_index": cell_index,
     }
+
+
+INDEX_ENTRY_SIZE_V2 = 38  # bytes per v2 index entry
 
 
 def decode_index_v2(data: bytes) -> list[dict]:

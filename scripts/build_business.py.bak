@@ -1,0 +1,525 @@
+#!/usr/bin/env python3
+"""
+Build TN.business.ptiles — Overture Places business data snapped to building footprints.
+
+Spatial join: for every Overture Place point that falls inside a TN building
+footprint polygon, encode the business details as a PTILESB record.
+
+Magic: PTILESB\0  (Business supplement for buildings)
+
+Record format (v1):
+  u64 osm_id              — delta from previous OSM node ID (zigzag varint)
+  i32 lon_micro           — absolute centroid (degrees * 100,000)
+  i32 lat_micro           — absolute centroid
+  u16_str name            — business name (required)
+  u8 category_idx         — indexed taxonomy primary category (0=missing)
+  u8 flags             
+    0x01: phone           (u8_str)
+    0x02: website         (u8_str)
+    0x04: address         (u16_str: freeform address)
+    0x08: brand           (u8_str)
+    0x10: operating_status (2-bit: 0=open, 1=closed, 2=temporarily)
+    0x20: emails          (u8_str, semicolon-joined)
+    0x40: socials         (u8_str, semicolon-joined)
+    0x80: UNUSED
+
+Usage:
+    uv run --with pyarrow --with shapely --with h3 --with zstandard --with numpy \\
+        python build_business.py
+"""
+
+import sys
+sys.stdout.reconfigure(line_buffering=True)
+import os
+import struct
+import io
+import glob
+import json
+import time
+from collections import defaultdict
+
+import pyarrow.parquet as pq
+import h3
+from shapely.geometry import Point, shape
+from shapely.strtree import STRtree
+from shapely.prepared import prep
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(__file__))
+from shared import (
+    write_header, HEADER_SIZE,
+    encode_varint, encode_string_u8, encode_string_u16,
+    zigzag_encode, compress_block, train_dictionary,
+    decode_varint, decode_string_u8, decode_string_u16,
+)
+
+MAGIC = b"PTILESB\0"
+VERSION = 1
+
+# --- Config ---
+
+PLACES_DIR = "/home/aoi/overture-2026-04-15.0/places"
+FOOTPRINTS_FILE = "/home/aoi/tennessee-all-enriched.geojsonl"
+OUTPUT_FILE = "/home/aoi/TN.business.ptiles"
+
+TN_BBOX = {
+    "min_lat": 34.5, "min_lon": -90.5,
+    "max_lat": 36.8, "max_lon": -81.5,
+}
+H3_RES = 7
+
+# --- Step 1: Read Overture Places, filter to TN ---
+
+def load_tn_places(places_dir: str) -> list[dict]:
+    """Load all Places GeoParquet files, filter to Tennessee area.
+
+    Strategy: read each file as Arrow table (fast parallel decode),
+    build filter indices in Python, cache lon/lat during filter pass,
+    then extract full data only for matched rows.
+
+    Peak memory: ~2-3GB per file (Arrow table) + match dicts (small).
+    """
+    files = sorted(glob.glob(os.path.join(places_dir, "part-*.zstd.parquet")))
+    if not files:
+        print("ERROR: No parquet files found in", places_dir, flush=True)
+        sys.exit(1)
+    print(f"{text}{last_bit}", flush=True)Found {len(files)} parquet files, reading TN-area places...", flush=True)
+
+    columns = [
+        "id", "geometry", "names", "categories", "addresses",
+        "phones", "websites", "emails", "socials", "brand",
+        "operating_status",
+    ]
+
+    all_places = []
+    for fname in files:
+        table = pq.read_table(fname, columns=columns)
+        n = len(table)
+
+        # Filter pass: read only addresses + geometry
+        addr_py = table.column("addresses").to_pylist()
+        geom_py = table.column("geometry").to_pylist()
+
+        match_indices = []
+        lon_vals = []
+        lat_vals = []
+        addr_vals = []
+        for i in range(n):
+            addrs = addr_py[i]
+            if not addrs:
+                continue
+            if addrs[0].get("country", "") != "US":
+                continue
+            geom_bytes = geom_py[i]
+            if len(geom_bytes) < 21:
+                continue
+            lon = struct.unpack_from("<d", geom_bytes, 5)[0]
+            lat = struct.unpack_from("<d", geom_bytes, 13)[0]
+            if (TN_BBOX["min_lat"] <= lat <= TN_BBOX["max_lat"]
+                    and TN_BBOX["min_lon"] <= lon <= TN_BBOX["max_lon"]):
+                match_indices.append(i)
+                lon_vals.append(lon)
+                lat_vals.append(lat)
+                addr_vals.append(addrs[0].get("freeform", "") or "")
+
+        # Free filter arrays
+        del addr_py, geom_py
+
+        # Build places only for matched rows
+        if match_indices:
+            id_py = table.column("id").to_pylist()
+            names_py = table.column("names").to_pylist()
+            cats_py = table.column("categories").to_pylist()
+            phones_py = table.column("phones").to_pylist()
+            websites_py = table.column("websites").to_pylist()
+            emails_py = table.column("emails").to_pylist()
+            socials_py = table.column("socials").to_pylist()
+            brand_py = table.column("brand").to_pylist()
+            op_py = table.column("operating_status").to_pylist()
+
+            for mi, idx in enumerate(match_indices):
+                names = names_py[idx]
+                cats = cats_py[idx]
+
+                place = {
+                    "id": id_py[idx],
+                    "lon": lon_vals[mi],
+                    "lat": lat_vals[mi],
+                    "name": names["primary"] if names else "",
+                    "category": cats["primary"] if cats else "",
+                    "freeform_addr": addr_vals[mi],
+                    "phone": phones_py[idx][0] if phones_py[idx] else "",
+                    "website": websites_py[idx][0] if websites_py[idx] else "",
+                    "email": emails_py[idx][0] if emails_py[idx] else "",
+                    "social": socials_py[idx][0] if socials_py[idx] else "",
+                    "brand": "",
+                    "operating_status": op_py[idx] or "",
+                }
+
+                br = brand_py[idx]
+                if br:
+                    bn = br.get("names", {})
+                    if bn:
+                        primary = bn.get("primary", "")
+                        if primary:
+                            place["brand"] = primary
+
+                all_places.append(place)
+
+        basename = os.path.basename(fname)
+        print(f"{text}{last_bit}", flush=True)  Processed {basename} — {len(all_places)} TN places so far", flush=True)
+
+    print(f"{text}{last_bit}", flush=True)\nTotal TN-area places: {len(all_places)}", flush=True)
+    return all_places
+
+
+# --- Step 2: Load building footprints ---
+
+def load_buildings(fp_path: str) -> tuple[list, list, np.ndarray]:
+    """Load building footprints, return (polygons, metadata, centroid_array)."""
+    print(f"{text}{last_bit}", flush=True)\nLoading building footprints from {fp_path}...", flush=True)
+    import json as jmod
+
+    polygons = []
+    meta = []  # list of {osm_id, lon, lat}
+    centroids = []
+
+    total_lines = 0
+    with open(fp_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                feat = jmod.loads(line)
+            except jmod.JSONDecodeError:
+                continue
+            total_lines += 1
+            if total_lines % 200000 == 0:
+                print(f"{text}{last_bit}", flush=True)  Read {total_lines} building records...", flush=True)
+
+            geom = feat.get("geometry")
+            if not geom or geom.get("type") not in ("Polygon", "MultiPolygon"):
+                continue
+
+            try:
+                poly = shape(geom)
+            except Exception:
+                continue
+            if poly.is_empty or not poly.is_valid:
+                continue
+
+            # Simplify slightly — 0.5m tolerance — for faster spatial ops
+            poly = poly.simplify(0.00005, preserve_topology=True)
+
+            polygons.append(poly)
+            meta.append({
+                "osm_id": feat.get("osm_id", 0),
+            })
+            centroids.append([feat.get("centroid_lon", 0), feat.get("centroid_lat", 0)])
+
+    centroids_arr = np.array(centroids, dtype=np.float64)
+    print(f"{text}{last_bit}", flush=True)  Loaded {len(polygons)} valid building polygons from {total_lines} total records")
+    return polygons, meta, centroids_arr
+
+
+# --- Step 3: Build category index ---
+
+def build_category_index(places: list[dict]) -> tuple[dict[str, int], list[str]]:
+    """Build indexed category lookup from Overture taxonomy primary categories."""
+    cat_counts = defaultdict(int)
+    for p in places:
+        if p["category"]:
+            cat_counts[p["category"]] += 1
+
+    # Sort by frequency descending, take top 255 (255 = custom)
+    sorted_cats = sorted(cat_counts.items(), key=lambda x: -x[1])
+    index = {}
+    reverse = []
+    for i, (cat, _) in enumerate(sorted_cats[:254]):
+        index[cat] = i
+        reverse.append(cat)
+    print(f"{text}{last_bit}", flush=True)  Category index: {len(index)} entries (top: {reverse[0] if reverse else 'none'})")
+    return index, reverse
+
+
+# --- Step 4: Spatial join ---
+
+def spatial_join(places: list[dict], polygons: list, build_meta: list) -> list[dict]:
+    """For each place, find the building polygon containing it. Uses STRtree."""
+    print(f"{text}{last_bit}", flush=True)\nBuilding spatial index on {len(polygons)} polygons...")
+    tree = STRtree(polygons)
+    polygon_items = tree.geometries.tolist() if hasattr(tree, 'geometries') else list(tree)
+    # Build a lookup: geometry -> metadata index
+    # STRtree returns geometries; we need to map back to meta
+    # Build a dict keyed by geom WKT for lookup
+    poly_to_idx = {}
+    for i, poly in enumerate(polygons):
+        # Use id() as key — each poly is a distinct object
+        poly_to_idx[id(poly)] = i
+
+    print(f"{text}{last_bit}", flush=True)Querying {len(places)} places against spatial index...")
+    matched = []
+    no_match = 0
+    start = time.time()
+
+    for pi, place in enumerate(places):
+        if pi > 0 and pi % 5000 == 0:
+            elapsed = time.time() - start
+            rate = pi / elapsed if elapsed > 0 else 0
+            print(f"{text}{last_bit}", flush=True)  {pi}/{len(places)} places processed, {len(matched)} matched, {rate:.0f}/s")
+
+        point = Point(place["lon"], place["lat"])
+
+        # Query R-tree for candidate polygons
+        candidates = tree.query(point)
+
+        found = False
+        for cand in candidates:
+            if cand.contains(point):
+                # Map back to meta
+                idx = poly_to_idx.get(id(cand), -1)
+                if idx >= 0:
+                    place["building_idx"] = idx
+                    place["building_osm_id"] = build_meta[idx]["osm_id"]
+                    matched.append(place)
+                    found = True
+                    break
+
+        if not found:
+            no_match += 1
+
+    elapsed = time.time() - start
+    print(f"{text}{last_bit}", flush=True)\nSpatial join complete in {elapsed:.1f}s")
+    print(f"{text}{last_bit}", flush=True)  Matched: {len(matched)} / {len(places)} ({100*len(matched)/len(places):.1f}%)")
+    print(f"{text}{last_bit}", flush=True)  No match: {no_match} ({100*no_match/len(places):.1f}%)")
+    return matched
+
+
+# --- Step 5: Encode records and group by H3 cell ---
+
+def encode_record(place: dict, prev_osm_id: int, cat_index: dict) -> bytes:
+    """Encode a single business record to binary."""
+    buf = bytearray()
+
+    # osm_id delta
+    osm_id = place.get("building_osm_id", 0)
+    delta = osm_id - prev_osm_id
+    buf.extend(encode_varint(zigzag_encode(delta)))
+
+    # centroid
+    buf.extend(struct.pack("<i", round(place["lon"] * 100_000)))
+    buf.extend(struct.pack("<i", round(place["lat"] * 100_000)))
+
+    # name (required)
+    buf.extend(encode_string_u16(place["name"]))
+
+    # category index (0 = missing)
+    cat = place.get("category", "")
+    if cat in cat_index:
+        buf.append(cat_index[cat])
+    else:
+        buf.append(0)
+
+    # flags byte
+    flags = 0
+    phone = place.get("phone", "")
+    website = place.get("website", "")
+    address = place.get("freeform_addr", "")
+    brand = place.get("brand", "")
+    status = place.get("operating_status", "")
+    email = place.get("email", "")
+    social = place.get("social", "")
+
+    if phone:
+        flags |= 0x01
+    if website:
+        flags |= 0x02
+    if address:
+        flags |= 0x04
+    if brand:
+        flags |= 0x08
+    if status == "permanently_closed":
+        flags |= 0x10  # closed
+    elif status == "temporarily_closed":
+        flags |= 0x12  # 0x10 | 0x02 = temp_closed
+    # 0x10 alone = open (default)
+    if email:
+        flags |= 0x20
+    if social:
+        flags |= 0x40
+
+    buf.append(flags)
+
+    if phone:
+        buf.extend(encode_string_u8(phone))
+    if website:
+        buf.extend(encode_string_u8(website))
+    if address:
+        buf.extend(encode_string_u16(address))
+    if brand:
+        buf.extend(encode_string_u8(brand))
+    if email:
+        buf.extend(encode_string_u8(email))
+    if social:
+        buf.extend(encode_string_u8(social))
+
+    # Prepend record length prefix (for block parsing)
+    record_body = bytes(buf)
+    return struct.pack("<I", len(record_body)) + record_body
+
+
+def group_and_encode(places: list[dict], cat_index: dict) -> dict[int, tuple[list[dict], bytes]]:
+    """Group places by H3 cell, encode each group as a compressed block."""
+    cells: dict[int, list[dict]] = defaultdict(list)
+    for p in places:
+        cell = h3.geo_to_h3(p["lat"], p["lon"], H3_RES)
+        cells[cell].append(p)
+
+    print(f"{text}{last_bit}", flush=True)\nGrouped into {len(cells)} H3 cells")
+
+    # Sort cells by h3 cell for index
+    sorted_cells = sorted(cells.items(), key=lambda x: x[0])
+
+    blocks = {}
+    for cell, cell_places in sorted_cells:
+        # Sort by osm_id for delta encoding
+        cell_places.sort(key=lambda p: p.get("building_osm_id", 0))
+
+        buf = bytearray()
+        prev_osm_id = 0
+        for p in cell_places:
+            buf.extend(encode_record(p, prev_osm_id, cat_index))
+            prev_osm_id = p.get("building_osm_id", 0)
+
+        blocks[int(cell)] = bytes(buf)
+
+    return blocks
+
+
+# --- Step 6: Write PTILESB file ---
+
+def write_ptilesb(output_path: str, places: list[dict], blocks: dict[int, bytes],
+                  cat_reverse: list[str]):
+    """Write the PTILESB file with header, dictionary, index, and compressed blocks."""
+    print(f"{text}{last_bit}", flush=True)\nWriting {output_path}...")
+
+    # Collect raw samples for dictionary training
+    samples = list(blocks.values())[:1000] if len(blocks) > 1000 else list(blocks.values())
+
+    # Train zstd dictionary
+    print(f"{text}{last_bit}", flush=True)  Training zstd dictionary on {len(samples)} samples...")
+    dict_data = train_dictionary(samples)
+
+    # Compress each block
+    compressed_blocks: dict[int, bytes] = {}
+    for cell, raw in blocks.items():
+        compressed_blocks[cell] = compress_block(raw, dict_data)
+
+    # Sort index entries by cell
+    sorted_cells = sorted(compressed_blocks.keys())
+
+    # Build spatial index entries (relative offsets)
+    index_entries = []
+    running_offset = 0
+    for cell in sorted_cells:
+        cb = compressed_blocks[cell]
+        entry = {
+            "h3_cell": cell,
+            "block_offset": running_offset,
+            "block_length": len(cb),
+            "feature_count": len([p for p in places if h3.geo_to_h3(p["lat"], p["lon"], H3_RES) == h3.cell_to_str(cell)]),
+        }
+        index_entries.append(entry)
+        running_offset += len(cb)
+
+    # Calculate offsets
+    header_size = HEADER_SIZE
+    dict_offset = header_size
+    dict_length = len(dict_data)
+    index_offset = dict_offset + dict_length
+    index_length = 4 + len(index_entries) * 19  # count + entries
+    blocks_offset = index_offset + index_length
+
+    # Compute bbox
+    lats = [p["lat"] for p in places]
+    lons = [p["lon"] for p in places]
+
+    # Open file and write
+    with open(output_path, "wb") as f:
+        # Write header (placeholders for now, will seek back)
+        write_header(
+            f, MAGIC, VERSION,
+            min(lats), min(lons), max(lats), max(lons),
+            len(places), len(compressed_blocks),
+            dict_offset, dict_length,
+            index_offset, index_length,
+            blocks_offset,
+        )
+
+        # Write dictionary
+        f.write(dict_data)
+
+        # Write index
+        from shared import write_index
+        write_index(f, index_entries)
+
+        # Write blocks with absolute offsets (re-encode)
+        for entry in index_entries:
+            f.write(compressed_blocks[entry["h3_cell"]])
+
+    # Update index entries to use absolute offsets
+    idx_offset = index_offset
+    with open(output_path, "r+b") as f:
+        idx_pos = idx_offset + 4  # skip entry count
+        for entry in index_entries:
+            abs_offset = blocks_offset + entry["block_offset"]
+            f.seek(idx_pos + 8)
+            f.write(abs_offset.to_bytes(6, "little"))
+            idx_pos += 19
+
+    total_size = os.path.getsize(output_path)
+    print(f"{text}{last_bit}", flush=True)\nPTILESB file written: {output_path}")
+    print(f"{text}{last_bit}", flush=True)  Size: {total_size:,} bytes ({total_size/1024/1024:.1f} MB)")
+    print(f"{text}{last_bit}", flush=True)  Places: {len(places)}")
+    print(f"{text}{last_bit}", flush=True)  Cells: {len(compressed_blocks)}")
+    print(f"{text}{last_bit}", flush=True)  Index entries: {len(index_entries)}")
+    print(f"{text}{last_bit}", flush=True)  Dictionary: {dict_length:,} bytes")
+
+    # Write category index as metadata
+    meta_path = output_path.replace(".ptiles", "_categories.json")
+    with open(meta_path, "w") as f:
+        json.dump({"categories": cat_reverse, "total_places": len(places)}, f, indent=2)
+    print(f"{text}{last_bit}", flush=True)  Category index: {meta_path}")
+
+
+# --- Main ---
+
+def main():
+    start = time.time()
+
+    places = load_tn_places(PLACES_DIR)
+    if not places:
+        print("No TN places found!")
+        sys.exit(1)
+
+    cat_index, cat_reverse = build_category_index(places)
+
+    polygons, build_meta, _ = load_buildings(FOOTPRINTS_FILE)
+
+    matched = spatial_join(places, polygons, build_meta)
+
+    if not matched:
+        print("No spatial matches found!")
+        sys.exit(1)
+
+    blocks = group_and_encode(matched, cat_index)
+
+    write_ptilesb(OUTPUT_FILE, matched, blocks, cat_reverse)
+
+    elapsed = time.time() - start
+    print(f"{text}{last_bit}", flush=True)\nTotal time: {elapsed:.1f}s")
+
+
+if __name__ == "__main__":
+    main()

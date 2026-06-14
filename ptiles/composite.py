@@ -19,6 +19,7 @@ from ptiles.buildings import Building, BuildingsReader
 from ptiles.business import Business, BusinessHit, BusinessReader
 from ptiles.parks import ParkFeature, ParkReader
 from ptiles.places import Place, PlacesReader
+from ptiles.rail import RailFeature, RailReader
 from ptiles.roads import NearestRoad, RoadsReader
 from ptiles.water import WaterFeature, WaterReader
 
@@ -35,6 +36,7 @@ class PointReport:
     parks: list[ParkFeature] = field(default_factory=list)
     places: list[Place] = field(default_factory=list)
     businesses: list[BusinessHit] = field(default_factory=list)
+    rail: list[RailFeature] = field(default_factory=list)
 
 
 @dataclass
@@ -44,6 +46,7 @@ class CorridorReport:
     roads: list = field(default_factory=list)
     parks: list[ParkFeature] = field(default_factory=list)
     water: list[WaterFeature] = field(default_factory=list)
+    rail: list[RailFeature] = field(default_factory=list)
 
 
 class Layer(Protocol):
@@ -162,6 +165,31 @@ class ParkLayer:
         self._reader.close()
 
 
+class RailLayer:
+    def __init__(self, path):
+        self._reader = RailReader.open(path)
+
+    def query_point(self, lat, lon, report, **kw):
+        try:
+            import h3
+
+            cell = int(h3.latlng_to_cell(lat, lon, 7), 16)
+            report.rail = self._reader.get_in_cell(cell)
+        except Exception as e:
+            logger.warning("Rail query failed: %s", e)
+
+    def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
+        try:
+            report.rail = self._reader.get_in_bounds(
+                min_lat, min_lon, max_lat, max_lon, limit=limit
+            )
+        except Exception as e:
+            logger.warning("Corridor rail failed: %s", e)
+
+    def close(self):
+        self._reader.close()
+
+
 class PlaceLayer:
     def __init__(self, path):
         self._reader = PlacesReader.open(path)
@@ -222,7 +250,7 @@ LAYER_CONFIG: list[tuple[str, type, bool, bool]] = [
     ("business", BusinessLayer, True, True),
     ("places", PlaceLayer, True, True),
     ("parks", ParkLayer, True, True),
-    # ("rail", RailLayer, True, True),  # no Layer adapter yet
+    ("rail", RailLayer, True, True),
 ]
 
 

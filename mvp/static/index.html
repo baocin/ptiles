@@ -119,6 +119,8 @@ select:focus{border-color:#3b3b5c}
       <option value="dark-buildings">Dark + Buildings</option>
     </select>
     <button class="btn btn-sm" id="btn-log" onclick="toggleLog()" style="color:#555">Log</button>
+    <button class="btn btn-sm active" id="btn-ptiles" onclick="toggleRoute('ptiles')" style="color:#e94560">ptiles</button>
+    <button class="btn btn-sm" id="btn-osrm" onclick="toggleRoute('osrm')" style="color:#4488ff">OSRM</button>
   </div>
 
   <div id="stats"></div>
@@ -159,6 +161,7 @@ let toastTimer = null;
 let roadLegend = null;
 let routeOriginMarker = null, routeDestMarker = null;
 let clickPhase = 'origin'; // 'origin' | 'dest' | 'done'
+let showPtiles = true, showOsrm = false; // show ptiles first, toggle osrm
 
 // --- Basemap management ---
 const darkTile = L.tileLayer('', { maxZoom: 19 });
@@ -409,7 +412,7 @@ async function loadBuildingsForViewport() {
 }
 
 // --- Routing ---
-async function route() {
+async function route(showOsrm) {
   const origin = parseLatLon(document.getElementById('origin-input').value);
   const dest = parseLatLon(document.getElementById('dest-input').value);
   if (!origin || !dest) { showToast('Invalid coordinates'); return; }
@@ -431,14 +434,20 @@ async function route() {
   const profile = document.getElementById('profile-select').value;
   const [ptilesRes, osrmRes] = await Promise.all([
     fetch(`/api/route?lat1=${origin[0]}&lon1=${origin[1]}&lat2=${dest[0]}&lon2=${dest[1]}&profile=${profile}`).then(r => r.json()),
-    fetch(`/api/route-osrm?lat1=${origin[0]}&lon1=${origin[1]}&lat2=${dest[0]}&lon2=${dest[1]}`).then(r => r.json()),
+    showOsrm !== false
+      ? fetch(`/api/route-osrm?lat1=${origin[0]}&lon1=${origin[1]}&lat2=${dest[0]}&lon2=${dest[1]}`).then(r => r.json())
+      : Promise.resolve(null),
   ]);
 
   if (ptilesRes.error) showToast('ptiles: ' + ptilesRes.error);
-  if (osrmRes.error) showToast('OSRM: ' + osrmRes.error);
+  if (osrmRes && osrmRes.error) showToast('OSRM: ' + osrmRes.error);
 
-  ptilesLayer = drawRoute(ptilesRes, '#e94560', 'ptiles', origin, dest);
-  osrmLayer = drawRoute(osrmRes, '#4488ff', 'OSRM', origin, dest);
+  if (showPtiles) {
+    ptilesLayer = drawRoute(ptilesRes, '#e94560', 'ptiles', origin, dest);
+  }
+  if (showOsrm && osrmRes) {
+    osrmLayer = drawRoute(osrmRes, '#4488ff', 'OSRM', origin, dest);
+  }
   updateStats(ptilesRes, osrmRes);
 
   const logEl = document.getElementById('route-log');
@@ -471,6 +480,24 @@ function toggleAutoRandom() {
   const checked = document.getElementById('auto-random').checked;
   if (checked) { autoTimer = setInterval(randomRoute, 3000); randomRoute(); }
   else { clearInterval(autoTimer); autoTimer = null; }
+}
+
+function toggleRoute(which) {
+  if (which === 'ptiles') {
+    showPtiles = !showPtiles;
+    document.getElementById('btn-ptiles').classList.toggle('active');
+    if (ptilesLayer) {
+      if (showPtiles) map.addLayer(ptilesLayer);
+      else map.removeLayer(ptilesLayer);
+    }
+  } else {
+    showOsrm = !showOsrm;
+    document.getElementById('btn-osrm').classList.toggle('active');
+    if (osrmLayer) {
+      if (showOsrm) map.addLayer(osrmLayer);
+      else map.removeLayer(osrmLayer);
+    }
+  }
 }
 
 // --- Building sidebar ---
@@ -519,8 +546,8 @@ legendCtrl.onAdd = () => {
 };
 legendCtrl.addTo(map);
 
-// Initial route
-route();
+// Initial route — ptiles only by default
+route(false);
 </script>
 </body>
 </html>

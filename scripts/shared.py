@@ -231,7 +231,7 @@ USE_REVERSE = {1: "residential", 2: "commercial", 3: "industrial/institutional"}
 # v2 Format Support (index entries, merged blocks, u16 coords)
 # ===========================================================================
 
-INDEX_ENTRY_SIZE_V2 = 37  # 8 + 4*4 + 6 + 3 + 2 + 2
+INDEX_ENTRY_SIZE_V2 = 38  # bytes per v2 index entry
 
 
 def index_entry_v2_format():

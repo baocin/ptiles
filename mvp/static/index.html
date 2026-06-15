@@ -326,11 +326,27 @@ function onMapMoveEnd() {
 async function loadRoadsForViewport() {
   if (!roadsVisible) return;
   const b = map.getBounds();
-  const minLat = b.getSouth(), minLon = b.getWest();
-  const maxLat = b.getNorth(), maxLon = b.getEast();
+  const span = b.getNorth() - b.getSouth();
+
+  // Clip roads to the same H3 disk area for performance with large viewports
+  const zoom = map.getZoom();
+  const diskRadius = Math.max(6, Math.round(36 - zoom * 2.5));
+  const center = map.getCenter();
+  const centerCell = h3.latLngToCell(center.lat, center.lng, 7);
+  const disk = h3.gridDisk(centerCell, Math.min(diskRadius, 14));
+  const diskBounds = { minLat: 90, maxLat: -90, minLon: 180, maxLon: -180 };
+  for (const cell of disk) {
+    const boundary = h3.cellToBoundary(cell);
+    for (const [lat, lon] of boundary) {
+      if (lat < diskBounds.minLat) diskBounds.minLat = lat;
+      if (lat > diskBounds.maxLat) diskBounds.maxLat = lat;
+      if (lon < diskBounds.minLon) diskBounds.minLon = lon;
+      if (lon > diskBounds.maxLon) diskBounds.maxLon = lon;
+    }
+  }
 
   try {
-    const res = await fetch(`/api/roads-bounds?min_lat=${minLat}&min_lon=${minLon}&max_lat=${maxLat}&max_lon=${maxLon}`);
+    const res = await fetch(`/api/roads-bounds?min_lat=${diskBounds.minLat}&min_lon=${diskBounds.minLon}&max_lat=${diskBounds.maxLat}&max_lon=${diskBounds.maxLon}`);
     const data = await res.json();
     if (data.error) { return; }
     if (!data.features) return;
@@ -386,13 +402,29 @@ function onMapMoveEndBuildings() {
 async function loadBuildingsForViewport() {
   if (buildingMode === BLDG_MODE.OFF) return;
   const b = map.getBounds();
-  const minLat = b.getSouth(), minLon = b.getWest();
-  const maxLat = b.getNorth(), maxLon = b.getEast();
-  const span = maxLat - minLat;
-  if (span > 0.15) return;
+  const center = map.getCenter();
+  const span = b.getNorth() - b.getSouth();
+  if (span > 0.5) return;
+
+  // Clip buildings to the same area the H3 grid covers: a disk around center
+  // Use the same disk radius formula as the H3 grid
+  const zoom = map.getZoom();
+  const diskRadius = Math.max(6, Math.round(36 - zoom * 2.5));
+  const centerCell = h3.latLngToCell(center.lat, center.lng, 7);
+  const disk = h3.gridDisk(centerCell, Math.min(diskRadius, 14));
+  const diskBounds = { minLat: 90, maxLat: -90, minLon: 180, maxLon: -180 };
+  for (const cell of disk) {
+    const boundary = h3.cellToBoundary(cell);
+    for (const [lat, lon] of boundary) {
+      if (lat < diskBounds.minLat) diskBounds.minLat = lat;
+      if (lat > diskBounds.maxLat) diskBounds.maxLat = lat;
+      if (lon < diskBounds.minLon) diskBounds.minLon = lon;
+      if (lon > diskBounds.maxLon) diskBounds.maxLon = lon;
+    }
+  }
 
   try {
-    const res = await fetch(`/api/buildings-bounds?min_lat=${minLat}&min_lon=${minLon}&max_lat=${maxLat}&max_lon=${maxLon}`);
+    const res = await fetch(`/api/buildings-bounds?min_lat=${diskBounds.minLat}&min_lon=${diskBounds.minLon}&max_lat=${diskBounds.maxLat}&max_lon=${diskBounds.maxLon}`);
     const data = await res.json();
     if (data.error || !data.features) return;
 
@@ -510,7 +542,9 @@ function loadH3Grid() {
     return;
   }
   const b = map.getBounds();
-  // Get cells for the 4 corners and center of viewport, expand with disk to fill gaps
+  // Scale disk radius with zoom so the grid fills the full viewport
+  // At zoom 12 a disk-6 covers ~30km radius; at zoom 10 need ~120km
+  const diskRadius = Math.max(6, Math.round(36 - zoom * 2.5));
   const corners = [
     [b.getNorth(), b.getWest()],
     [b.getNorth(), b.getEast()],
@@ -523,7 +557,7 @@ function loadH3Grid() {
     try {
       const c = h3.latLngToCell(lat, lng, H3_RES);
       // Get a disk of cells around each corner to fill the viewport
-      const disk = h3.gridDisk(c, 6);
+      const disk = h3.gridDisk(c, diskRadius);
       for (const d of disk) cellSet.add(d);
     } catch(e) { console.warn('h3 corner:', e); }
   }

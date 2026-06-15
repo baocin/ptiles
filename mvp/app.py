@@ -158,11 +158,17 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response({"error": f"OSRM failed: {e}"}, 502)
 
     def random_route(self):
-        """Pick random coords from denser road network zone for better ptiles success."""
-        lat1 = random.uniform(US_ROAD_ZONE["min_lat"], US_ROAD_ZONE["max_lat"])
-        lon1 = random.uniform(US_ROAD_ZONE["min_lon"], US_ROAD_ZONE["max_lon"])
-        lat2 = random.uniform(US_ROAD_ZONE["min_lat"], US_ROAD_ZONE["max_lat"])
-        lon2 = random.uniform(US_ROAD_ZONE["min_lon"], US_ROAD_ZONE["max_lon"])
+        """Pick random coords from within US state bounding boxes (land only)."""
+        # Pick a random state weighted by area, then random point within its bbox
+        abbr = random.choices(
+            list(STATE_BBOXES.keys()),
+            weights=[(b[2] - b[0]) * (b[3] - b[1]) for b in STATE_BBOXES.values()],
+        )[0]
+        min_lon, min_lat, max_lon, max_lat = STATE_BBOXES[abbr]
+        lat1 = random.uniform(min_lat, max_lat)
+        lon1 = random.uniform(min_lon, max_lon)
+        lat2 = random.uniform(min_lat, max_lat)
+        lon2 = random.uniform(min_lon, max_lon)
         self.json_response(
             {"origin": {"lat": lat1, "lon": lon1}, "dest": {"lat": lat2, "lon": lon2}}
         )

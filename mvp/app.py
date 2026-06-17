@@ -113,16 +113,30 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             profile = qs.get("profile", "driving")
-            url = f"http://localhost:9353/route?lat1={lat1}&lon1={lon1}&lat2={lat2}&lon2={lon2}&profile={profile}"
-            req = urllib.request.Request(url, headers={"User-Agent": "ptiles-mvp/1.0"})
-            resp = urllib.request.urlopen(req, timeout=30)
-            data = json.loads(resp.read())
-            self.json_response(data)
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()
-            self.json_response(json.loads(body), e.code)
-        except urllib.error.URLError as e:
-            self.json_response({"error": f"Daemon unreachable: {e.reason}"}, 503)
+            # Call ptiles CLI directly instead of daemon
+            r = subprocess.run(
+                [str(PTILES_CLI), "route", str(ROADS_DIR),
+                 str(lat1), str(lon1), str(lat2), str(lon2), "--json", f"--profile={profile}"],
+                    "route",
+                    str(ROADS_DIR),
+                    lat1,
+                    lon1,
+                    lat2,
+                    lon2,
+                    "--json",
+                    f"--profile={profile}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if r.returncode != 0:
+                err = r.stderr.strip() or "route failed"
+                self.json_response({"error": err}, 500)
+                return
+            self.json_response(json.loads(r.stdout))
+        except subprocess.TimeoutExpired:
+            self.json_response({"error": "Route timeout"}, 504)
         except Exception as e:
             self.json_response({"error": f"Route failed: {e}"}, 500)
 

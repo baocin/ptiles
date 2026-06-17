@@ -99,6 +99,22 @@ v8 builds on v7's wall encoding but adds per-block string deduplication: buildin
 | 96     | 4    | uint32 | data_version  | Pipeline/data build version                                             |
 | 100    | 156  | -      | reserved      | Future use                                                              |
 
+## Client library
+
+[JavaScript client](https://github.com/baocin/ptile-client) — read PTILES files in Node.js and the browser.
+
+```js
+import { definePtiles } from "ptile-client";
+import * as h3 from "h3-js";
+
+const { ptile, ready } = definePtiles({
+  source: "https://pub-e46b7d7ee876916fd2db17000245b340.r2.dev/maps/",
+  h3,
+});
+await ready;
+const building = await ptile(36.16, -86.78);
+```
+
 ## Magic bytes
 
 | Byte   | ASCII | Layer                      |
@@ -137,22 +153,6 @@ u8      flags2            (extended flags)
 ```
 
 Centroid is computed from coordinate mean (not stored).
-
-## Client library
-
-[JavaScript client](https://github.com/baocin/ptile-client) for reading PTILES files in Node.js and the browser. Supports single-file and multi-state auto-routing.
-
-```js
-import { definePtiles } from "ptile-client";
-import * as h3 from "h3-js";
-
-const { ptile, ready } = definePtiles({
-  source: "https://pub-e46b7d7ee876916fd2db17000245b340.r2.dev/maps/",
-  h3,
-});
-await ready;
-const building = await ptile(36.16, -86.78);
-```
 
 ## Hosted tiles
 

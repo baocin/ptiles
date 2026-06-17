@@ -14,6 +14,22 @@ PTILES is a compact binary tile format for geospatial features. Each file covers
 
 Current format: **v8 for buildings** (77M footprints, ~4 bytes/building), **v2 for roads** (56M segments), **v1 for water/business/places/rail/parks/admin**.
 
+## Client library
+
+[JavaScript client](https://github.com/baocin/ptile-client) — read PTILES files in Node.js and the browser.
+
+```js
+import { definePtiles } from "ptile-client";
+import * as h3 from "h3-js";
+
+const { ptile, ready } = definePtiles({
+  source: "https://pub-e46b7d7ee876916fd2db17000245b340.r2.dev/maps/",
+  h3,
+});
+await ready;
+const building = await ptile(36.16, -86.78);
+```
+
 ## Compression evolution
 
 | Version | What changed                                                                                                                                                                                                          | Per-building savings |
@@ -98,22 +114,6 @@ v8 builds on v7's wall encoding but adds per-block string deduplication: buildin
 | 92     | 4    | -      | reserved      |                                                                         |
 | 96     | 4    | uint32 | data_version  | Pipeline/data build version                                             |
 | 100    | 156  | -      | reserved      | Future use                                                              |
-
-## Client library
-
-[JavaScript client](https://github.com/baocin/ptile-client) — read PTILES files in Node.js and the browser.
-
-```js
-import { definePtiles } from "ptile-client";
-import * as h3 from "h3-js";
-
-const { ptile, ready } = definePtiles({
-  source: "https://pub-e46b7d7ee876916fd2db17000245b340.r2.dev/maps/",
-  h3,
-});
-await ready;
-const building = await ptile(36.16, -86.78);
-```
 
 ## Magic bytes
 

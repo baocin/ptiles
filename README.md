@@ -10,9 +10,11 @@
 10|
 11|## What it is
 12|
-13|PTILES is a compact binary tile format for geospatial features. Each file covers one layer (buildings, roads, water, business, etc.) for a geographic region. Files are self-describing with a 256-byte header, zstd dictionary, spatial H3 index, and compressed data blocks.
-14|
-15|Current format: **v8 for buildings** (77M footprints, ~4 bytes/building), **v2 for roads** (56M segments), **v1 for water/business/places/rail/parks/admin**.
+PTILES is a compact binary format for geospatial **feature lookup** — given a GPS coordinate, what building am I in, what road is nearest, what business is here. Each file covers one layer (buildings, roads, water, business, etc.) for a geographic region. Files are self-describing with a 256-byte header, zstd dictionary, spatial H3 index, and compressed data blocks.
+
+**PTILES vs PMTiles:** PMTiles is a storage format for pre-rendered map tiles (MVT) designed for cheap self-hosted map rendering via HTTP range requests off S3. It answers "draw this 256x256 tile at zoom 14." PTILES is a feature database organized for spatial lookup — it answers "what's at this GPS coordinate." A PMTiles query at a lat/lon fetches a whole tile (~100KB+) and decodes every feature in it. A PTILES query hashes to one H3 cell, decompresses one small block (~1-5KB), and iterates only the buildings in that cell. PTILES files are also entirely offline-readable with no server.
+
+Current format: **v8 for buildings** (77M footprints, ~4 bytes/building), **v2 for roads** (56M segments), **v1 for water/business/places/rail/parks/admin**.
 16|
 17|## Client library
 18|

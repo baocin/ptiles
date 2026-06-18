@@ -32,6 +32,8 @@ await ready;
 const building = await ptile(36.16, -86.78);
 ```
 
+**Try it live:** [`demo/demo.html`](demo/demo.html) — a self-contained HTML page that loads PTILES files from R2 and queries buildings at any GPS point. Open it in any modern browser, no server needed.
+
 ## Compression evolution
 
 | Version | What changed                                                                                                                                                                             | Per-building savings |

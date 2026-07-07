@@ -2,7 +2,7 @@
 
 Comprehensive offline GPS context format. Given any coordinate, return everything useful about that location — building, road, address, admin region, water, parks, transit, and nearby POIs.
 
-**Total US coverage: ~2.1–3.2 GB** (vs hundreds of GB source data).
+**Total US coverage: ~3.8 GB** (all 8 layers, all 51 states + DC).
 
 ---
 
@@ -14,14 +14,14 @@ Comprehensive offline GPS context format. Given any coordinate, return everythin
   - [Spatial Index](#spatial-index)
   - [Coordinate Encoding](#coordinate-encoding)
   - [Varint / Zigzag Encoding](#varint--zigzag-encoding)
-- [Layer: Buildings (F)](#layer-buildings-f) — existing v6 format
+- [Layer: Buildings (F)](#layer-buildings-f) — existing v8 format
 - [Layer: Roads (R)](#layer-roads-r)
 - [Layer: Admin Boundaries (A)](#layer-admin-boundaries-a)
 - [Layer: Water (W)](#layer-water-w)
 - [Layer: Places (P)](#layer-places-p)
 - [Layer: Parks (N)](#layer-parks-n)
 - [Layer: Rail & Transit (T)](#layer-rail--transit-t)
-- [Layer: POIs (I)](#layer-pois-i)
+- [Layer: Business / POIs (B)](#layer-business--pois-b) — existing v3 format, plus Business Name Index (X)
 - [Layer: Address Ranges (D)](#layer-address-ranges-d)
 - [Layer: Routing (U)](#layer-routing-u)
 - [Combined Query](#combined-query)
@@ -34,27 +34,28 @@ Comprehensive offline GPS context format. Given any coordinate, return everythin
 
 Each layer is a separate file with its own schema optimized for its data characteristics. All files share the same header structure, spatial index format, and compression primitives.
 
-| Name | Magic | Layer | Geometry | Est. Size |
-|------|-------|-------|----------|-----------|
-| `US.ptiles` | `PTILESF\\x00` | Buildings | Small polygons | ~1.14 GB |
-| `US.roads.ptiles` | `PTILESR\\x00` | Roads | LineStrings (split at cell boundaries) | ~0.75–1.0 GB |
-| `US.admin.ptiles` | `PTILESA\\x00` | Admin + ZIP + TZ | H3 lookup grid + large polygons | ~50–100 MB |
-| `US.water.ptiles` | `PTILESW\\x00` | Water bodies | Mixed polygon + linestring | ~200–400 MB |
-| `US.places.ptiles` | `PTILESP\\x00` | Place names | Points | ~20–50 MB |
-| `US.parks.ptiles` | `PTILESN\\x00` | Parks & protected areas | H3 lookup grid + polygons | ~30–80 MB |
-| `US.rail.ptiles` | `PTILEST\\x00` | Rail & transit | LineStrings + points | ~30–60 MB |
-| `US.poi.ptiles` | `PTILESI\\x00` | POIs | Points | ~50–150 MB |
-| `US.addr.ptiles` | `PTILESD\\x00` | Address ranges | LineStrings + metadata | ~200–500 MB |
-| `TN.routing.ptiles` | `PTILESU\\x00` | Routing | Portal graphs (no geometry) | ~50 MB/TN, ~2 GB/US |
+| Name                          | Magic         | Layer                   | Geometry                               | Est. Size             |
+| ----------------------------- | ------------- | ----------------------- | -------------------------------------- | --------------------- |
+| `{STATE}.buildings_v8.ptiles` | `PTILESF\x00` | Buildings               | Small polygons                         | ~1.1 GB (51 files)    |
+| `{STATE}.roads.ptiles`        | `PTILESR\x00` | Roads                   | LineStrings (split at cell boundaries) | ~1.5 GB (51 files)    |
+| `US.admin.ptiles`             | `PTILESA\x00` | Admin + ZIP + TZ        | H3 lookup grid + large polygons        | ~50-100 MB            |
+| `{STATE}.water.ptiles`        | `PTILESW\x00` | Water bodies            | Mixed polygon + linestring             | ~100 MB (51 files)    |
+| `{STATE}.places.ptiles`       | `PTILESP\x00` | Place names             | Points                                 | ~15 MB (51 files)     |
+| `{STATE}.parks.ptiles`        | `PTILESN\x00` | Parks & protected areas | H3 lookup grid + polygons              | ~27 MB (51 files)     |
+| `{STATE}.rail.ptiles`         | `PTILEST\x00` | Rail & transit          | LineStrings + points                   | ~448 KB (51 files)    |
+| `{STATE}.business.ptiles`     | `PTILESB\x00` | Business / POIs         | Points                                 | ~975 MB (51 files)    |
+| `{STATE}.business_name_index.ptiles` | `PTILESX\x00` | Business name search   | Points (letter-keyed, not spatial)     | small (derived)       |
+| `{STATE}.addr.ptiles`         | `PTILESD\x00` | Address ranges          | LineStrings + metadata                 | ~200-500 MB (planned) |
+| `{STATE}.routing.ptiles`      | `PTILESU\x00` | Routing                 | Portal graphs (no geometry)            | ~50 MB/TN (planned)   |
 
 **Why separate files?** Each data type has radically different feature density (77M buildings vs 3K admin regions), geometry characteristics (5-vertex polygons vs 50K-vertex state borders), optimal compression, and query patterns. Separate files let each be independently optimized, cached, and updated.
 
 Three encoding paradigms:
 
-| Paradigm | Used by | Description |
-|----------|---------|-------------|
+| Paradigm              | Used by                                        | Description                                               |
+| --------------------- | ---------------------------------------------- | --------------------------------------------------------- |
 | **Per-cell features** | Buildings, Roads, Water, Rail, POIs, Addresses | Features stored in H3 cell blocks, one feature per record |
-| **H3 lookup grid** | Admin, Parks | Pre-computed answer per H3 cell, O(log n) binary search |
+| **H3 lookup grid**    | Admin, Parks                                   | Pre-computed answer per H3 cell, O(log n) binary search   |
 
 ---
 
@@ -64,43 +65,44 @@ All PTiles files use these common structures.
 
 ### Header (256 bytes)
 
-| Offset | Size | Type | Field | Description |
-|--------|------|------|-------|-------------|
-| 0 | 7 | bytes | magic_prefix | `PTILES` + layer byte (see table) |
-| 7 | 1 | uint8 | magic_null | `\x00` terminator |
-| 8 | 1 | uint8 | version | Schema version (current: 6 for buildings, 1 for new layers) |
-| 9 | 3 | — | reserved | Alignment padding |
-| 12 | 4 | float32 | min_lat | Bounding box south |
-| 16 | 4 | float32 | min_lon | Bounding box west |
-| 20 | 4 | float32 | max_lat | Bounding box north |
-| 24 | 4 | float32 | max_lon | Bounding box east |
-| 28 | 8 | uint64 | feature_count | Total feature/record count |
-| 36 | 4 | uint32 | block_count | Number of H3 cell blocks |
-| 40 | 8 | uint64 | dict_offset | Byte offset to zstd dictionary |
-| 48 | 4 | uint32 | dict_length | Dictionary size in bytes |
-| 52 | 8 | uint64 | index_offset | Byte offset to spatial index |
-| 60 | 4 | uint32 | index_length | Index size in bytes |
-| 64 | 8 | uint64 | blocks_offset | Byte offset to first data block |
-| 72 | 8 | uint64 | aux_offset | Byte offset to auxiliary section (0 if unused) |
-| 80 | 4 | uint32 | aux_length | Auxiliary section size (0 if unused) |
-| 84 | 172 | — | reserved | Future use (zeroed) |
+| Offset | Size | Type    | Field         | Description                                    |
+| ------ | ---- | ------- | ------------- | ---------------------------------------------- | --------------------------------------------------------------- |
+| 0      | 7    | bytes   | magic_prefix  | `PTILES` + layer byte (see table)              |
+| 7      | 1    | uint8   | magic_null    | `\x00` terminator                              |
+|        | 8    | 1       | uint8         | version                                        | Schema version (buildings: 8, roads: 2, business: 2, others: 1) |
+| 9      | 3    | —       | reserved      | Alignment padding                              |
+| 12     | 4    | float32 | min_lat       | Bounding box south                             |
+| 16     | 4    | float32 | min_lon       | Bounding box west                              |
+| 20     | 4    | float32 | max_lat       | Bounding box north                             |
+| 24     | 4    | float32 | max_lon       | Bounding box east                              |
+| 28     | 8    | uint64  | feature_count | Total feature/record count                     |
+| 36     | 4    | uint32  | block_count   | Number of H3 cell blocks                       |
+| 40     | 8    | uint64  | dict_offset   | Byte offset to zstd dictionary                 |
+| 48     | 4    | uint32  | dict_length   | Dictionary size in bytes                       |
+| 52     | 8    | uint64  | index_offset  | Byte offset to spatial index                   |
+| 60     | 4    | uint32  | index_length  | Index size in bytes                            |
+| 64     | 8    | uint64  | blocks_offset | Byte offset to first data block                |
+| 72     | 8    | uint64  | aux_offset    | Byte offset to auxiliary section (0 if unused) |
+| 80     | 4    | uint32  | aux_length    | Auxiliary section size (0 if unused)           |
+| 84     | 172  | —       | reserved      | Future use (zeroed)                            |
 
 **Byte order:** Little-endian throughout.
 
 **Magic layer bytes:**
 
-| Byte | ASCII | Layer |
-|------|-------|-------|
-| `0x46` | `F` | Buildings (footprints) |
-| `0x52` | `R` | Roads |
-| `0x41` | `A` | Admin boundaries |
-| `0x57` | `W` | Water |
-| `0x50` | `P` | Places |
-| `0x4E` | `N` | Parks (nature/protected) |
-| `0x54` | `T` | Rail/transit |
-| `0x49` | `I` | POIs (interests) |
-| `0x44` | `D` | Address ranges (delivery) |
-| `0x55` | `U` | Routing (Urban navigation) |
+| Byte   | ASCII | Layer                      |
+| ------ | ----- | -------------------------- |
+| `0x46` | `F`   | Buildings (footprints)     |
+| `0x52` | `R`   | Roads                      |
+| `0x41` | `A`   | Admin boundaries           |
+| `0x57` | `W`   | Water                      |
+| `0x50` | `P`   | Places                     |
+| `0x4E` | `N`   | Parks (nature/protected)   |
+| `0x54` | `T`   | Rail/transit               |
+| `0x42` | `B`   | Business / POIs            |
+| `0x58` | `X`   | Business name index        |
+| `0x44` | `D`   | Address ranges (delivery)  |
+| `0x55` | `U`   | Routing (Urban navigation) |
 
 **Auxiliary section** (`aux_offset`/`aux_length`): Used by layers that need an additional data structure beyond the standard header → dictionary → index → blocks layout. Admin and Parks layers use this for their lookup grids. Other layers set these fields to 0.
 
@@ -148,11 +150,11 @@ Features within a block are sorted by OSM ID (or source ID) for delta encoding.
 
 **Precision:** Microdegrees (degrees × 100,000) stored as int32.
 
-| Property | Value |
-|----------|-------|
-| 1 unit | ~1.1 m at equator, ~0.7 m at 50° lat |
-| int32 range | ±21,474° (covers Earth) |
-| Typical building wall delta | ±5,000 units (±55 m) |
+| Property                    | Value                                |
+| --------------------------- | ------------------------------------ |
+| 1 unit                      | ~1.1 m at equator, ~0.7 m at 50° lat |
+| int32 range                 | ±21,474° (covers Earth)              |
+| Typical building wall delta | ±5,000 units (±55 m)                 |
 
 First coordinate in each feature stored absolute (int32 lon, int32 lat = 8 bytes). Subsequent vertices stored as zigzag varint delta pairs.
 
@@ -175,11 +177,11 @@ while value >= 0x80:
 emit(value)
 ```
 
-| Value range | Bytes |
-|-------------|-------|
-| 0–127 | 1 |
-| 128–16,383 | 2 |
-| 16,384–2,097,151 | 3 |
+| Value range      | Bytes |
+| ---------------- | ----- |
+| 0–127            | 1     |
+| 128–16,383       | 2     |
+| 16,384–2,097,151 | 3     |
 
 ### Zstd Dictionary
 
@@ -201,24 +203,24 @@ Range: bytes=12345678-12348000   # Single block per query
 
 ## Layer: Buildings (F)
 
-**Magic:** `PTILESF\x00` — **Status:** Implemented (v6)
+**Magic:** `PTILESF\x00` — **Status:** Implemented (v8)
 
-See [README.md](./README.md) for the full v6 building schema. Summary:
+See [README.md](./README.md) for the full v8 building schema. Summary:
 
-| Field | Encoding | Description |
-|-------|----------|-------------|
-| osm_id | varint (delta) | Delta from previous OSM ID in block |
-| vertex_count | uint8 | Polygon vertex count (max 255) |
-| first_lon | int32 | First longitude × 100,000 |
-| first_lat | int32 | First latitude × 100,000 |
-| deltas | zigzag varint pairs | Delta lon/lat per subsequent vertex |
-| flags | uint8 | Bitmask for optional fields |
-| btype_idx | uint8 | Building type (20 indexed + 255=custom) |
-| [name] | uint16 len + UTF-8 | If flags & 0x01 |
-| [category] | uint8 len + UTF-8 | If flags & 0x02 |
-| [name_source] | uint8 len + UTF-8 | If flags & 0x04 |
-| [poi_osm_id] | uint64 | If flags & 0x08 |
-| [height] | uint8 | If flags & 0x10 (0.5 m steps, 0–127.5 m) |
+| Field         | Encoding            | Description                              |
+| ------------- | ------------------- | ---------------------------------------- |
+| osm_id        | varint (delta)      | Delta from previous OSM ID in block      |
+| vertex_count  | uint8               | Polygon vertex count (max 255)           |
+| first_lon     | int32               | First longitude × 100,000                |
+| first_lat     | int32               | First latitude × 100,000                 |
+| deltas        | zigzag varint pairs | Delta lon/lat per subsequent vertex      |
+| flags         | uint8               | Bitmask for optional fields              |
+| btype_idx     | uint8               | Building type (20 indexed + 255=custom)  |
+| [name]        | uint16 len + UTF-8  | If flags & 0x01                          |
+| [category]    | uint8 len + UTF-8   | If flags & 0x02                          |
+| [name_source] | uint8 len + UTF-8   | If flags & 0x04                          |
+| [poi_osm_id]  | uint64              | If flags & 0x08                          |
+| [height]      | uint8               | If flags & 0x10 (0.5 m steps, 0–127.5 m) |
 
 **Query:** GPS → H3 cell → binary search → decompress → point-in-polygon test.
 
@@ -248,46 +250,46 @@ Splitting increases record count by ~30–40% but preserves the uniform query mo
 
 ### Record Format
 
-| Field | Encoding | Description |
-|-------|----------|-------------|
-| osm_way_id | varint (delta) | Delta from previous ID in block |
-| vertex_count | uint16 | Vertex count (uint16 — roads can exceed 255 vertices) |
-| first_lon | int32 | First longitude × 100,000 |
-| first_lat | int32 | First latitude × 100,000 |
-| deltas | zigzag varint pairs | Delta lon/lat per subsequent vertex |
-| flags | uint8 | Bitmask for optional fields |
-| road_class | uint8 | Indexed road type (see table) |
-| [name] | uint16 len + UTF-8 | If flags & 0x01 |
-| [ref] | uint8 len + UTF-8 | If flags & 0x02 — route ref (e.g., "I-95", "US-1") |
-| [oneway] | uint8 | If flags & 0x04 — 0=no, 1=forward, 2=reverse |
-| [speed_limit] | uint8 | If flags & 0x08 — km/h (0–255) |
-| [lanes] | uint8 | If flags & 0x10 — total lane count |
-| [surface] | uint8 | If flags & 0x20 — indexed surface type |
-| [bridge_tunnel] | uint8 | If flags & 0x40 — 0=neither, 1=bridge, 2=tunnel |
+| Field           | Encoding            | Description                                           |
+| --------------- | ------------------- | ----------------------------------------------------- |
+| osm_way_id      | varint (delta)      | Delta from previous ID in block                       |
+| vertex_count    | uint16              | Vertex count (uint16 — roads can exceed 255 vertices) |
+| first_lon       | int32               | First longitude × 100,000                             |
+| first_lat       | int32               | First latitude × 100,000                              |
+| deltas          | zigzag varint pairs | Delta lon/lat per subsequent vertex                   |
+| flags           | uint8               | Bitmask for optional fields                           |
+| road_class      | uint8               | Indexed road type (see table)                         |
+| [name]          | uint16 len + UTF-8  | If flags & 0x01                                       |
+| [ref]           | uint8 len + UTF-8   | If flags & 0x02 — route ref (e.g., "I-95", "US-1")    |
+| [oneway]        | uint8               | If flags & 0x04 — 0=no, 1=forward, 2=reverse          |
+| [speed_limit]   | uint8               | If flags & 0x08 — km/h (0–255)                        |
+| [lanes]         | uint8               | If flags & 0x10 — total lane count                    |
+| [surface]       | uint8               | If flags & 0x20 — indexed surface type                |
+| [bridge_tunnel] | uint8               | If flags & 0x40 — 0=neither, 1=bridge, 2=tunnel       |
 
 ### Road Class Index
 
-| Index | Type | Index | Type |
-|-------|------|-------|------|
-| 0 | motorway | 8 | residential |
-| 1 | motorway_link | 9 | service |
-| 2 | trunk | 10 | track |
-| 3 | trunk_link | 11 | footway |
-| 4 | primary | 12 | cycleway |
-| 5 | primary_link | 13 | path |
-| 6 | secondary | 14 | pedestrian |
-| 7 | tertiary | 15 | tertiary_link |
-| 255 | (custom) | — | uint8 len + UTF-8 follows |
+| Index | Type          | Index | Type                      |
+| ----- | ------------- | ----- | ------------------------- |
+| 0     | motorway      | 8     | residential               |
+| 1     | motorway_link | 9     | service                   |
+| 2     | trunk         | 10    | track                     |
+| 3     | trunk_link    | 11    | footway                   |
+| 4     | primary       | 12    | cycleway                  |
+| 5     | primary_link  | 13    | path                      |
+| 6     | secondary     | 14    | pedestrian                |
+| 7     | tertiary      | 15    | tertiary_link             |
+| 255   | (custom)      | —     | uint8 len + UTF-8 follows |
 
 ### Surface Index
 
-| Index | Surface | Index | Surface |
-|-------|---------|-------|---------|
-| 0 | paved | 4 | gravel |
-| 1 | asphalt | 5 | dirt |
-| 2 | concrete | 6 | sand |
-| 3 | unpaved | 7 | grass |
-| 255 | (custom) | — | uint8 len + UTF-8 follows |
+| Index | Surface  | Index | Surface                   |
+| ----- | -------- | ----- | ------------------------- |
+| 0     | paved    | 4     | gravel                    |
+| 1     | asphalt  | 5     | dirt                      |
+| 2     | concrete | 6     | sand                      |
+| 3     | unpaved  | 7     | grass                     |
+| 255   | (custom) | —     | uint8 len + UTF-8 follows |
 
 ### Query: "What road am I near?"
 
@@ -321,13 +323,13 @@ def point_to_linestring_distance(px, py, coords):
 
 ### Estimated Size
 
-| Metric | Value |
-|--------|-------|
-| OSM road segments (US) | ~20M |
-| After cell splitting | ~28–30M |
-| Avg vertices/segment | ~8–12 |
-| Avg bytes/segment (compressed) | ~25–35 |
-| **Total file size** | **~0.75–1.0 GB** |
+| Metric                         | Value            |
+| ------------------------------ | ---------------- |
+| OSM road segments (US)         | ~20M             |
+| After cell splitting           | ~28–30M          |
+| Avg vertices/segment           | ~8–12            |
+| Avg bytes/segment (compressed) | ~25–35           |
+| **Total file size**            | **~0.75–1.0 GB** |
 
 ---
 
@@ -359,13 +361,13 @@ The spatial index and data blocks sections of the header point to the string tab
 
 Zstd-compressed arrays of null-terminated UTF-8 strings, referenced by index from the lookup grid.
 
-| Table | Max entries | Example |
-|-------|-------------|---------|
-| Country names | uint8 (256) | "United States" |
-| State names | uint8 (256) | "California" |
-| County names | uint16 (65,536) | "San Francisco County" |
-| ZIP codes | uint16 (65,536) | "94103" |
-| Time zone names | uint8 (256) | "America/Los_Angeles" |
+| Table           | Max entries     | Example                |
+| --------------- | --------------- | ---------------------- |
+| Country names   | uint8 (256)     | "United States"        |
+| State names     | uint8 (256)     | "California"           |
+| County names    | uint16 (65,536) | "San Francisco County" |
+| ZIP codes       | uint16 (65,536) | "94103"                |
+| Time zone names | uint8 (256)     | "America/Los_Angeles"  |
 
 ### H3 Lookup Grid
 
@@ -392,13 +394,13 @@ Entry size: **16 bytes** (8 + 1 + 1 + 2 + 2 + 1 + 1).
 
 **Boundary flags:**
 
-| Bit | Mask | Meaning |
-|-----|------|---------|
-| 0 | 0x01 | Cell straddles a state boundary |
-| 1 | 0x02 | Cell straddles a county boundary |
-| 2 | 0x04 | Cell straddles a ZIP code boundary |
-| 3 | 0x08 | Cell straddles a time zone boundary |
-| 4–7 | — | Reserved |
+| Bit | Mask | Meaning                             |
+| --- | ---- | ----------------------------------- |
+| 0   | 0x01 | Cell straddles a state boundary     |
+| 1   | 0x02 | Cell straddles a county boundary    |
+| 2   | 0x04 | Cell straddles a ZIP code boundary  |
+| 3   | 0x08 | Cell straddles a time zone boundary |
+| 4–7 | —    | Reserved                            |
 
 When a boundary flag is set, the lookup grid returns the **majority** region for that cell. For exact determination, fall back to point-in-polygon against the feature table polygons.
 
@@ -406,14 +408,14 @@ When a boundary flag is set, the lookup grid returns the **majority** region for
 
 Admin boundary polygons stored for rendering and PIP fallback. Each feature:
 
-| Field | Encoding | Description |
-|-------|----------|-------------|
-| feature_id | uint16 | Unique ID |
-| admin_level | uint8 | 2=country, 4=state, 6=county |
-| name_len | uint16 | |
-| name | UTF-8 | |
-| vertex_count | uint32 | Can be very large |
-| coordinates | int32 pairs | Absolute first + zigzag varint deltas |
+| Field        | Encoding    | Description                           |
+| ------------ | ----------- | ------------------------------------- |
+| feature_id   | uint16      | Unique ID                             |
+| admin_level  | uint8       | 2=country, 4=state, 6=county          |
+| name_len     | uint16      |                                       |
+| name         | UTF-8       |                                       |
+| vertex_count | uint32      | Can be very large                     |
+| coordinates  | int32 pairs | Absolute first + zigzag varint deltas |
 
 ### Query: "What state/county/ZIP am I in?"
 
@@ -444,12 +446,12 @@ def query_admin(lat, lng, grid, string_tables, features):
 
 ### Estimated Size
 
-| Component | Size |
-|-----------|------|
+| Component                     | Size                          |
+| ----------------------------- | ----------------------------- |
 | Lookup grid (380K × 16 bytes) | ~6 MB raw, ~2–3 MB compressed |
-| String tables | ~200 KB |
-| Boundary polygons | ~50–100 MB compressed |
-| **Total** | **~50–100 MB** |
+| String tables                 | ~200 KB                       |
+| Boundary polygons             | ~50–100 MB compressed         |
+| **Total**                     | **~50–100 MB**                |
 
 ---
 
@@ -461,56 +463,56 @@ Water bodies (polygons) and waterways (linestrings) from OSM and NHD.
 
 ### Mixed Geometry Handling
 
-| Feature type | Geometry | Storage strategy |
-|--------------|----------|-----------------|
-| Small pond/lake | Polygon | Per-cell block (like buildings) |
-| Large lake/bay (> 1,000 vertices) | Polygon | Feature table + H3 cell references |
-| River/stream/canal | LineString | Split at H3 boundaries (like roads) |
+| Feature type                      | Geometry   | Storage strategy                    |
+| --------------------------------- | ---------- | ----------------------------------- |
+| Small pond/lake                   | Polygon    | Per-cell block (like buildings)     |
+| Large lake/bay (> 1,000 vertices) | Polygon    | Feature table + H3 cell references  |
+| River/stream/canal                | LineString | Split at H3 boundaries (like roads) |
 
 ### Record Format
 
-| Field | Encoding | Description |
-|-------|----------|-------------|
-| osm_id | varint (delta) | Delta from previous ID in block |
-| geom_type | uint8 | 0 = polygon, 1 = linestring, 2 = reference |
-| vertex_count | uint16 | Vertex count (0 if geom_type = 2) |
-| first_lon | int32 | First longitude × 100,000 (absent if reference) |
-| first_lat | int32 | First latitude × 100,000 (absent if reference) |
-| deltas | zigzag varint pairs | (absent if reference) |
-| [ref_feature_id] | uint32 | Only if geom_type = 2 — points to feature table |
-| flags | uint8 | Bitmask for optional fields |
-| water_type | uint8 | Indexed water type |
-| [name] | uint16 len + UTF-8 | If flags & 0x01 |
-| [width] | uint16 | If flags & 0x02 — width in decimeters (0–6,553.5 m) |
-| [depth] | uint16 | If flags & 0x04 — max depth in decimeters |
+| Field            | Encoding            | Description                                         |
+| ---------------- | ------------------- | --------------------------------------------------- |
+| osm_id           | varint (delta)      | Delta from previous ID in block                     |
+| geom_type        | uint8               | 0 = polygon, 1 = linestring, 2 = reference          |
+| vertex_count     | uint16              | Vertex count (0 if geom_type = 2)                   |
+| first_lon        | int32               | First longitude × 100,000 (absent if reference)     |
+| first_lat        | int32               | First latitude × 100,000 (absent if reference)      |
+| deltas           | zigzag varint pairs | (absent if reference)                               |
+| [ref_feature_id] | uint32              | Only if geom_type = 2 — points to feature table     |
+| flags            | uint8               | Bitmask for optional fields                         |
+| water_type       | uint8               | Indexed water type                                  |
+| [name]           | uint16 len + UTF-8  | If flags & 0x01                                     |
+| [width]          | uint16              | If flags & 0x02 — width in decimeters (0–6,553.5 m) |
+| [depth]          | uint16              | If flags & 0x04 — max depth in decimeters           |
 
 **geom_type = 2 (reference):** For large water bodies. The record contains only a `ref_feature_id` pointing to a full polygon in the feature table. The record is duplicated in every H3 cell the water body covers, but only the ID (4 bytes) is repeated, not the geometry.
 
 ### Water Type Index
 
-| Index | Type | Index | Type |
-|-------|------|-------|------|
-| 0 | lake | 7 | drain |
-| 1 | reservoir | 8 | bay |
-| 2 | pond | 9 | ocean |
-| 3 | river | 10 | wetland |
-| 4 | stream | 11 | marsh |
-| 5 | creek | 12 | swamp |
-| 6 | canal | 13 | estuary |
-| 255 | (custom) | — | uint8 len + UTF-8 follows |
+| Index | Type      | Index | Type                      |
+| ----- | --------- | ----- | ------------------------- |
+| 0     | lake      | 7     | drain                     |
+| 1     | reservoir | 8     | bay                       |
+| 2     | pond      | 9     | ocean                     |
+| 3     | river     | 10    | wetland                   |
+| 4     | stream    | 11    | marsh                     |
+| 5     | creek     | 12    | swamp                     |
+| 6     | canal     | 13    | estuary                   |
+| 255   | (custom)  | —     | uint8 len + UTF-8 follows |
 
 ### Feature Table (Large Water Bodies)
 
 Stored in the auxiliary section. Contains full polygon geometry for water bodies too large for per-cell storage.
 
-| Field | Encoding | Description |
-|-------|----------|-------------|
-| feature_id | uint32 | Referenced by cell records |
-| name_len | uint16 | |
-| name | UTF-8 | |
-| water_type | uint8 | |
-| vertex_count | uint32 | |
-| coordinates | int32 first + zigzag varint deltas | |
+| Field        | Encoding                           | Description                |
+| ------------ | ---------------------------------- | -------------------------- |
+| feature_id   | uint32                             | Referenced by cell records |
+| name_len     | uint16                             |                            |
+| name         | UTF-8                              |                            |
+| water_type   | uint8                              |                            |
+| vertex_count | uint32                             |                            |
+| coordinates  | int32 first + zigzag varint deltas |                            |
 
 ### Query: "Am I near water?"
 
@@ -522,12 +524,12 @@ Stored in the auxiliary section. Contains full polygon geometry for water bodies
 
 ### Estimated Size
 
-| Metric | Value |
-|--------|-------|
-| Water polygons (US, OSM + NHD) | ~3M |
-| Waterway linestrings | ~2M |
-| Large water body features | ~5K |
-| **Total file size** | **~200–400 MB** |
+| Metric                         | Value           |
+| ------------------------------ | --------------- |
+| Water polygons (US, OSM + NHD) | ~3M             |
+| Waterway linestrings           | ~2M             |
+| Large water body features      | ~5K             |
+| **Total file size**            | **~200–400 MB** |
 
 ---
 
@@ -539,33 +541,33 @@ Named populated places and neighborhoods — point features with name, type, and
 
 ### Record Format
 
-| Field | Encoding | Description |
-|-------|----------|-------------|
-| osm_id | varint (delta) | Delta from previous ID in block |
-| lon | int32 | Center longitude × 100,000 |
-| lat | int32 | Center latitude × 100,000 |
-| place_type | uint8 | Indexed place type |
-| population | varint | Population (0 = unknown) |
-| name_len | uint16 | |
-| name | UTF-8 | Place name |
-| flags | uint8 | Bitmask for optional fields |
-| [alt_name] | uint16 len + UTF-8 | If flags & 0x01 — alternate/local name |
-| [admin_level] | uint8 | If flags & 0x02 — OSM admin_level value |
+| Field         | Encoding           | Description                             |
+| ------------- | ------------------ | --------------------------------------- |
+| osm_id        | varint (delta)     | Delta from previous ID in block         |
+| lon           | int32              | Center longitude × 100,000              |
+| lat           | int32              | Center latitude × 100,000               |
+| place_type    | uint8              | Indexed place type                      |
+| population    | varint             | Population (0 = unknown)                |
+| name_len      | uint16             |                                         |
+| name          | UTF-8              | Place name                              |
+| flags         | uint8              | Bitmask for optional fields             |
+| [alt_name]    | uint16 len + UTF-8 | If flags & 0x01 — alternate/local name  |
+| [admin_level] | uint8              | If flags & 0x02 — OSM admin_level value |
 
 ### Place Type Index
 
-| Index | Type | Typical population |
-|-------|------|--------------------|
-| 0 | city | > 100,000 |
-| 1 | town | 10,000–100,000 |
-| 2 | village | 1,000–10,000 |
-| 3 | hamlet | < 1,000 |
-| 4 | neighborhood | — |
-| 5 | suburb | — |
-| 6 | borough | — |
-| 7 | quarter | — |
-| 8 | isolated_dwelling | < 10 |
-| 255 | (custom) | uint8 len + UTF-8 follows |
+| Index | Type              | Typical population        |
+| ----- | ----------------- | ------------------------- |
+| 0     | city              | > 100,000                 |
+| 1     | town              | 10,000–100,000            |
+| 2     | village           | 1,000–10,000              |
+| 3     | hamlet            | < 1,000                   |
+| 4     | neighborhood      | —                         |
+| 5     | suburb            | —                         |
+| 6     | borough           | —                         |
+| 7     | quarter           | —                         |
+| 8     | isolated_dwelling | < 10                      |
+| 255   | (custom)          | uint8 len + UTF-8 follows |
 
 ### Query: "What place/neighborhood am I in?"
 
@@ -576,23 +578,23 @@ Named populated places and neighborhoods — point features with name, type, and
 
 **Scoring heuristic:**
 
-| Place type | Influence radius |
-|------------|-----------------|
-| city | ~15 km |
-| town | ~5 km |
-| village | ~2 km |
-| hamlet | ~500 m |
-| neighborhood | ~1 km |
-| suburb | ~3 km |
+| Place type   | Influence radius |
+| ------------ | ---------------- |
+| city         | ~15 km           |
+| town         | ~5 km            |
+| village      | ~2 km            |
+| hamlet       | ~500 m           |
+| neighborhood | ~1 km            |
+| suburb       | ~3 km            |
 
 ### Estimated Size
 
-| Metric | Value |
-|--------|-------|
-| US populated places (OSM + Census) | ~200K |
-| US neighborhoods | ~50K |
-| Avg bytes/record (compressed) | ~40–60 |
-| **Total** | **~20–50 MB** |
+| Metric                             | Value         |
+| ---------------------------------- | ------------- |
+| US populated places (OSM + Census) | ~200K         |
+| US neighborhoods                   | ~50K          |
+| Avg bytes/record (compressed)      | ~40–60        |
+| **Total**                          | **~20–50 MB** |
 
 ---
 
@@ -635,39 +637,39 @@ Entry size: **variable** — 9 bytes + 5 bytes per overlapping park. Most cells 
 
 ### Designation Index
 
-| Index | Designation | Index | Designation |
-|-------|-------------|-------|-------------|
-| 0 | National Park | 7 | National Monument |
-| 1 | National Forest | 8 | BLM Land |
-| 2 | National Wildlife Refuge | 9 | National Seashore/Lakeshore |
-| 3 | State Park | 10 | National Recreation Area |
-| 4 | State Forest | 11 | National Grassland |
-| 5 | City/County Park | 12 | Military Installation |
-| 6 | Wilderness Area | 13 | Tribal Land |
-| 255 | (custom) | — | uint8 len + UTF-8 follows |
+| Index | Designation              | Index | Designation                 |
+| ----- | ------------------------ | ----- | --------------------------- |
+| 0     | National Park            | 7     | National Monument           |
+| 1     | National Forest          | 8     | BLM Land                    |
+| 2     | National Wildlife Refuge | 9     | National Seashore/Lakeshore |
+| 3     | State Park               | 10    | National Recreation Area    |
+| 4     | State Forest             | 11    | National Grassland          |
+| 5     | City/County Park         | 12    | Military Installation       |
+| 6     | Wilderness Area          | 13    | Tribal Land                 |
+| 255   | (custom)                 | —     | uint8 len + UTF-8 follows   |
 
 ### GAP Status (PAD-US)
 
-| Value | Protection level |
-|-------|-----------------|
-| 1 | Managed for biodiversity — disturbance events proceed or are mimicked |
-| 2 | Managed for biodiversity — disturbance events suppressed |
-| 3 | Managed for multiple uses — subject to extractive use |
-| 4 | No known mandate for protection |
+| Value | Protection level                                                      |
+| ----- | --------------------------------------------------------------------- |
+| 1     | Managed for biodiversity — disturbance events proceed or are mimicked |
+| 2     | Managed for biodiversity — disturbance events suppressed              |
+| 3     | Managed for multiple uses — subject to extractive use                 |
+| 4     | No known mandate for protection                                       |
 
 ### Feature Table
 
-| Field | Encoding | Description |
-|-------|----------|-------------|
-| park_id | uint16 | |
-| name_len | uint16 | |
-| name | UTF-8 | |
-| designation | uint8 | |
-| managing_agency_len | uint8 | |
-| managing_agency | UTF-8 | e.g., "NPS", "USFS", "BLM" |
-| area_km2 | uint32 | Area in square kilometers |
-| vertex_count | uint32 | |
-| coordinates | int32 first + zigzag varint deltas | Boundary polygon |
+| Field               | Encoding                           | Description                |
+| ------------------- | ---------------------------------- | -------------------------- |
+| park_id             | uint16                             |                            |
+| name_len            | uint16                             |                            |
+| name                | UTF-8                              |                            |
+| designation         | uint8                              |                            |
+| managing_agency_len | uint8                              |                            |
+| managing_agency     | UTF-8                              | e.g., "NPS", "USFS", "BLM" |
+| area_km2            | uint32                             | Area in square kilometers  |
+| vertex_count        | uint32                             |                            |
+| coordinates         | int32 first + zigzag varint deltas | Boundary polygon           |
 
 ### Query: "Am I in a park?"
 
@@ -678,11 +680,11 @@ Entry size: **variable** — 9 bytes + 5 bytes per overlapping park. Most cells 
 
 ### Estimated Size
 
-| Metric | Value |
-|--------|-------|
-| Protected areas (PAD-US) | ~300K features |
-| H3 cells in protected areas | ~100K |
-| **Total** | **~30–80 MB** |
+| Metric                      | Value          |
+| --------------------------- | -------------- |
+| Protected areas (PAD-US)    | ~300K features |
+| H3 cells in protected areas | ~100K          |
+| **Total**                   | **~30–80 MB**  |
 
 ---
 
@@ -694,31 +696,31 @@ Rail lines and transit stations. LineStrings split at H3 boundaries (like roads)
 
 ### Record Format
 
-| Field | Encoding | Description |
-|-------|----------|-------------|
-| osm_id | varint (delta) | Delta from previous ID in block |
-| vertex_count | uint16 | 1 for stations, > 1 for lines |
-| first_lon | int32 | First (or only) longitude × 100,000 |
-| first_lat | int32 | First (or only) latitude × 100,000 |
-| deltas | zigzag varint pairs | (empty if vertex_count = 1) |
-| flags | uint8 | Bitmask for optional fields |
-| rail_type | uint8 | Indexed rail/station type |
-| [name] | uint16 len + UTF-8 | If flags & 0x01 |
-| [operator] | uint8 len + UTF-8 | If flags & 0x02 |
-| [gauge] | uint16 | If flags & 0x04 — track gauge in mm (1435 = standard) |
-| [electrified] | uint8 | If flags & 0x08 — 0=no, 1=contact_line, 2=rail, 3=yes |
+| Field         | Encoding            | Description                                           |
+| ------------- | ------------------- | ----------------------------------------------------- |
+| osm_id        | varint (delta)      | Delta from previous ID in block                       |
+| vertex_count  | uint16              | 1 for stations, > 1 for lines                         |
+| first_lon     | int32               | First (or only) longitude × 100,000                   |
+| first_lat     | int32               | First (or only) latitude × 100,000                    |
+| deltas        | zigzag varint pairs | (empty if vertex_count = 1)                           |
+| flags         | uint8               | Bitmask for optional fields                           |
+| rail_type     | uint8               | Indexed rail/station type                             |
+| [name]        | uint16 len + UTF-8  | If flags & 0x01                                       |
+| [operator]    | uint8 len + UTF-8   | If flags & 0x02                                       |
+| [gauge]       | uint16              | If flags & 0x04 — track gauge in mm (1435 = standard) |
+| [electrified] | uint8               | If flags & 0x08 — 0=no, 1=contact_line, 2=rail, 3=yes |
 
 ### Rail Type Index
 
-| Index | Type | Index | Type |
-|-------|------|-------|------|
-| 0 | rail | 6 | monorail |
-| 1 | subway | 7 | funicular |
-| 2 | tram | 8 | station |
-| 3 | light_rail | 9 | halt |
-| 4 | narrow_gauge | 10 | tram_stop |
-| 5 | preserved | 11 | subway_entrance |
-| 255 | (custom) | — | uint8 len + UTF-8 follows |
+| Index | Type         | Index | Type                      |
+| ----- | ------------ | ----- | ------------------------- |
+| 0     | rail         | 6     | monorail                  |
+| 1     | subway       | 7     | funicular                 |
+| 2     | tram         | 8     | station                   |
+| 3     | light_rail   | 9     | halt                      |
+| 4     | narrow_gauge | 10    | tram_stop                 |
+| 5     | preserved    | 11    | subway_entrance           |
+| 255   | (custom)     | —     | uint8 len + UTF-8 follows |
 
 ### Query: "What's the nearest rail/transit?"
 
@@ -726,66 +728,106 @@ Same approach as roads: point-to-linestring distance for lines, point-to-point d
 
 ### Estimated Size
 
-| Metric | Value |
-|--------|-------|
+| Metric               | Value                          |
+| -------------------- | ------------------------------ |
 | Rail lines (US, OSM) | ~500K segments after splitting |
-| Stations | ~50K |
-| **Total** | **~30–60 MB** |
+| Stations             | ~50K                           |
+| **Total**            | **~30–60 MB**                  |
 
 ---
 
-## Layer: POIs (I)
+## Layer: Business / POIs (B)
 
-**Magic:** `PTILESI\x00`
+**Magic:** `PTILESB\x00` — **Status:** Implemented (v3) — one file per state, `{STATE}.business.ptiles`
 
-Point-of-interest features that don't have building footprints — standalone nodes in OSM like trailheads, viewpoints, fire hydrants, cell towers, etc.
+Unified business/POI point data joined from Overture Places and Foursquare OS Places, deduplicated across sources and cross-referenced against chain/brand indices. This is a from-scratch dataset — not the generic OSM POI layer described in earlier drafts of this spec. It covers standalone businesses regardless of whether they sit inside a building footprint (unlike the Buildings layer's embedded business fields, which only cover buildings OSM already resolved).
 
-**Note:** POIs that _do_ have building footprints are in the Buildings layer. This layer covers the rest.
+Built by `scripts/build_full_ptilesb.py`. Verified against a real file:
 
-### Record Format
+```
+$ python3 -c "from shared import read_header; print(read_header(open('TN.business.ptiles','rb')))"
+{'magic': b'PTILESB', 'version': 3, 'feature_count': 829528, 'block_count': 18162,
+ 'dict_offset': 256, 'dict_length': 524288, 'index_offset': 524544,
+ 'index_length': 345082, 'blocks_offset': 869626, 'aux_offset': 0, 'aux_length': 0}
+```
 
-| Field | Encoding | Description |
-|-------|----------|-------------|
-| osm_id | varint (delta) | Delta from previous ID in block |
-| lon | int32 | Longitude × 100,000 |
-| lat | int32 | Latitude × 100,000 |
-| flags | uint8 | Bitmask for optional fields |
-| poi_type | uint8 | Indexed POI type |
-| [name] | uint16 len + UTF-8 | If flags & 0x01 |
-| [category] | uint8 len + UTF-8 | If flags & 0x02 — sub-type detail |
-| [phone] | uint8 len + UTF-8 | If flags & 0x04 |
-| [website] | uint16 len + UTF-8 | If flags & 0x08 |
-| [opening_hours] | uint8 len + UTF-8 | If flags & 0x10 |
+Header, spatial index (H3 res 7, 19-byte entries), and zstd dictionary framing all follow the [common structures](#common-structures) above — `aux_offset`/`aux_length` are unused (0) for this layer.
 
-### POI Type Index
+### Record Format (v3)
 
-| Index | Type | Index | Type |
-|-------|------|-------|------|
-| 0 | fuel | 10 | cell_tower |
-| 1 | parking | 11 | fire_hydrant |
-| 2 | atm | 12 | bench |
-| 3 | restaurant | 13 | toilet |
-| 4 | cafe | 14 | drinking_water |
-| 5 | fast_food | 15 | post_box |
-| 6 | bank | 16 | recycling |
-| 7 | pharmacy | 17 | charging_station |
-| 8 | viewpoint | 18 | picnic_site |
-| 9 | trailhead | 19 | campsite |
-| 255 | (custom) | — | uint8 len + UTF-8 follows |
+Unlike other per-cell layers, each business record is **length-prefixed** (`uint32 record_len` covering everything after the prefix) so decoders can skip records without fully parsing variable-length fields — this is what the name-index builder relies on to stream every block. IDs are a 64-bit `unified_id` (`sha256("{source}:{source_id}")[:8]`, little-endian), not an OSM node ID — Overture/Foursquare records have no shared native ID space.
 
-### Query: "What POIs are nearby?"
+| Field            | Encoding              | Description                                                          |
+| ---------------- | --------------------- | ---------------------------------------------------------------------- |
+| record_len       | uint32                | Byte length of everything below (for record skipping)                  |
+| unified_id       | varint (zigzag delta) | Delta from previous `unified_id` in block (sorted ascending)            |
+| lon              | int32                 | Longitude × 100,000                                                    |
+| lat              | int32                 | Latitude × 100,000                                                     |
+| name             | uint16 len + UTF-8    | Business name (required, may be empty)                                 |
+| category_idx     | uint8                 | Index into the per-file category list (0 = none)                       |
+| flags            | uint8                 | Bitmask for optional fields                                             |
+| [phone]          | uint8 len + UTF-8     | If flags & 0x01                                                        |
+| [website]        | uint8 len + UTF-8     | If flags & 0x02                                                        |
+| [address]        | uint16 len + UTF-8    | If flags & 0x04 — freeform street address                              |
+| [brand]          | uint8 len + UTF-8     | If flags & 0x08 — resolved brand/chain name                            |
+| [chain_count]    | uint8                 | If flags & 0x80 — number of locations for this chain (capped at 255)   |
+| [ext_flags]      | uint16                | Present only if any extended attribute below is set — omitted entirely otherwise |
+| [source_type]    | uint8                 | If ext_flags & 0x01 — 1 = Overture, 2 = Foursquare                      |
+| [source_id]      | uint16 len + UTF-8    | If ext_flags & 0x02 — original per-source record ID                    |
+| [confidence]     | uint8                 | If ext_flags & 0x04 — match/dedup confidence, 0-100                    |
+| [unified_id_alt] | uint64                | If ext_flags & 0x08 — alternate unified ID (merged duplicate)          |
 
-1. lat/lng → H3 cell (+ optional neighbors for wider radius)
-2. Compute distance to each POI in cell
-3. Return all within radius, sorted by distance
+Bits 0x10, 0x20, and 0x40 of `flags` are reserved/unused in the v3 encoder (earlier drafts of this format used 0x10 for a 2-bit `operating_status` and 0x20/0x40 for emails/socials; the current production encoder does not emit them, but decoders should tolerate them being set and skip the corresponding sub-fields per the v1 layout for backward compatibility with pre-v3 files).
+
+**Category index:** `category_idx` is per-file, not global — each `{STATE}.business.ptiles` build assigns indices 1-254 to that state's categories sorted by frequency (0 = uncategorized, 255 unused/reserved). The mapping is written to a sidecar `{STATE}.business_categories.json` (`{"categories": [...], "total_places": N, "version": 3, "format": "unified-poi"}`) — `categories[category_idx - 1]` gives the category string. Decoders needing category names must load this sidecar; it is not embedded in the `.ptiles` file itself.
+
+### Query: "What businesses are nearby?"
+
+1. lat/lng → H3 res-7 cell (+ optional neighbors for wider radius)
+2. Binary-search index for the cell's block, decompress
+3. Walk records (respecting `record_len` to skip fields you don't need), accumulate running `unified_id` and compute distance
+4. Return all within radius, sorted by distance
+
+### Layer: Business Name Index (X) — search support
+
+**Magic:** `PTILESX\x00` — **Status:** Implemented (v1) — one file per state, `{STATE}.business_name_index.ptiles`, built from an existing `{STATE}.business.ptiles` by `scripts/build_business_name_index.py`
+
+Built for name-prefix search (e.g. autocomplete/typeahead over business names), where the primary business layer's H3-cell grouping is useless — you don't know the cell a business is in until you've already found it. This file reuses the same header/index framing as every other layer, but blocks are grouped by **first letter of the business name** instead of by H3 cell, and there is no zstd dictionary (`dict_length = 0`, blocks are compressed standalone).
+
+**Key scheme:** the spatial index's `h3_cell` field is repurposed as a **letter key** (0-27), not an actual H3 cell:
+
+| Key  | Meaning                                       |
+| ---- | ---------------------------------------------- |
+| 0-25 | `a`-`z` — first character of name, lowercased  |
+| 26   | Name starts with a digit or other non-letter   |
+| 27   | Empty or missing name                          |
+
+Index entries are sorted by key ascending; a client wanting all businesses starting with `"s"` looks up key `18` directly (or does a small linear/binary scan since there are at most 28 entries — no need for H3 math). Within a block, records are in the same relative order they were encountered while streaming the source `.business.ptiles` file (not alphabetically sub-sorted).
+
+Each name-index record is a **reduced-field, self-contained** re-encoding of the corresponding business record — it does not reference back into the business file by offset, only by a synthetic cross-reference `uid`:
+
+| Field        | Encoding           | Description                                                                                     |
+| ------------ | ------------------ | ------------------------------------------------------------------------------------------------- |
+| record_len   | uint32             | Byte length of everything below                                                                   |
+| name         | uint16 len + UTF-8 | Full business name                                                                                 |
+| lat_micro    | int32              | Latitude × 100,000                                                                                 |
+| lon_micro    | int32              | Longitude × 100,000                                                                                |
+| uid          | uint32             | Sequential ID assigned during the index build (0-based, in block-iteration order over the source file) — **not stable across rebuilds**, and not the same as `unified_id` |
+| category_idx | uint8              | Copied from the source record (same per-state category sidecar applies)                           |
+| flags        | uint8              | Bitmask — only phone (0x01), website (0x02), brand (0x08) are preserved; address/chain/ext-attrs are dropped |
+| [phone]      | uint8 len + UTF-8  | If flags & 0x01                                                                                    |
+| [website]    | uint8 len + UTF-8  | If flags & 0x02                                                                                    |
+| [brand]      | uint8 len + UTF-8  | If flags & 0x08                                                                                    |
+
+**Caveat for implementers:** `uid` is a fresh counter over the source file's block-by-block, then-record-by-record iteration order at index-build time — it has no relationship to `unified_id` and will change if the source `.business.ptiles` is rebuilt (even with identical data, if H3 iteration order changes). Do not persist `uid` across rebuilds or use it as a durable cross-file key; if a stable join back to the full business record is needed, re-match on `(name, lat_micro, lon_micro)` or extend the index format to carry `unified_id` instead.
 
 ### Estimated Size
 
-| Metric | Value |
-|--------|-------|
-| US POIs without buildings (OSM) | ~5–10M |
-| Avg bytes/POI (compressed) | ~10–20 |
-| **Total** | **~50–150 MB** |
+| Metric                            | Value                               |
+| ---------------------------------- | -------------------------------------- |
+| TN businesses (verified)           | 829,528 records / 18,162 H3 blocks     |
+| `TN.business.ptiles` file size     | ~54 MB                                 |
+| US total (51 states, extrapolated) | ~975 MB                                |
 
 ---
 
@@ -799,23 +841,23 @@ Street-level address ranges for reverse geocoding. Each record is a road segment
 
 ### Record Format
 
-| Field | Encoding | Description |
-|-------|----------|-------------|
-| tlid | varint (delta) | TIGER/Line feature ID, delta from previous |
-| vertex_count | uint16 | Segment vertex count |
-| first_lon | int32 | First longitude × 100,000 |
-| first_lat | int32 | First latitude × 100,000 |
-| deltas | zigzag varint pairs | Delta coordinates |
-| flags | uint8 | Bitmask for optional fields |
-| street_name_len | uint16 | |
-| street_name | UTF-8 | Full street name (e.g., "N Main St") |
-| [left_from] | varint | If flags & 0x01 — starting address, left side |
-| [left_to] | varint | If flags & 0x01 — ending address, left side |
-| [right_from] | varint | If flags & 0x02 — starting address, right side |
-| [right_to] | varint | If flags & 0x02 — ending address, right side |
-| [zip_left] | uint16 | If flags & 0x04 — ZIP code, left side |
-| [zip_right] | uint16 | If flags & 0x08 — ZIP code, right side |
-| [cfcc] | uint8 | If flags & 0x10 — Census Feature Class Code |
+| Field           | Encoding            | Description                                    |
+| --------------- | ------------------- | ---------------------------------------------- |
+| tlid            | varint (delta)      | TIGER/Line feature ID, delta from previous     |
+| vertex_count    | uint16              | Segment vertex count                           |
+| first_lon       | int32               | First longitude × 100,000                      |
+| first_lat       | int32               | First latitude × 100,000                       |
+| deltas          | zigzag varint pairs | Delta coordinates                              |
+| flags           | uint8               | Bitmask for optional fields                    |
+| street_name_len | uint16              |                                                |
+| street_name     | UTF-8               | Full street name (e.g., "N Main St")           |
+| [left_from]     | varint              | If flags & 0x01 — starting address, left side  |
+| [left_to]       | varint              | If flags & 0x01 — ending address, left side    |
+| [right_from]    | varint              | If flags & 0x02 — starting address, right side |
+| [right_to]      | varint              | If flags & 0x02 — ending address, right side   |
+| [zip_left]      | uint16              | If flags & 0x04 — ZIP code, left side          |
+| [zip_right]     | uint16              | If flags & 0x08 — ZIP code, right side         |
+| [cfcc]          | uint8               | If flags & 0x10 — Census Feature Class Code    |
 
 ### Address Interpolation
 
@@ -864,12 +906,12 @@ def reverse_geocode(lat, lng, segments):
 
 ### Estimated Size
 
-| Metric | Value |
-|--------|-------|
-| TIGER/Line address segments (US) | ~20M |
-| After cell splitting | ~25–30M |
-| Avg bytes/segment (compressed) | ~15–25 |
-| **Total** | **~200–500 MB** |
+| Metric                           | Value           |
+| -------------------------------- | --------------- |
+| TIGER/Line address segments (US) | ~20M            |
+| After cell splitting             | ~25–30M         |
+| Avg bytes/segment (compressed)   | ~15–25          |
+| **Total**                        | **~200–500 MB** |
 
 ## Layer: Routing (U)
 
@@ -969,33 +1011,35 @@ def query_all(lat, lng, layers):
     "distance_m": 200
   },
   "nearby_poi": [
-    {"name": null, "type": "fuel", "distance_m": 85},
-    {"name": "Dolores Park", "type": "viewpoint", "distance_m": 300}
+    { "name": null, "type": "fuel", "distance_m": 85 },
+    { "name": "Dolores Park", "type": "viewpoint", "distance_m": 300 }
   ]
 }
 ```
 
 ### Storage Budget
 
-| Layer | File | Est. Size |
-|-------|------|-----------|
-| Buildings | `US.ptiles` | ~1.14 GB |
-| Roads | `US.roads.ptiles` | ~0.75–1.0 GB |
-| Address Ranges | `US.addr.ptiles` | ~200–500 MB |
-| Water | `US.water.ptiles` | ~200–400 MB |
-| POIs | `US.poi.ptiles` | ~50–150 MB |
-| Admin + ZIP + TZ | `US.admin.ptiles` | ~50–100 MB |
-| Parks | `US.parks.ptiles` | ~30–80 MB |
-| Rail/Transit | `US.rail.ptiles` | ~30–60 MB |
-| Places | `US.places.ptiles` | ~20–50 MB |
-| **Total** | | **~2.1–3.2 GB** |
+| Layer            | File                                         | Est. Size   |
+| ---------------- | -------------------------------------------- | ----------- |
+| Buildings        | `{STATE}.buildings_v8.ptiles` (51 per-state) | ~1.1 GB     |
+| Roads            | `{STATE}.roads.ptiles` (51 per-state)        | ~1.5 GB     |
+| Business / POIs  | `{STATE}.business.ptiles` (51 per-state)     | ~975 MB     |
+| Business name index | `{STATE}.business_name_index.ptiles` (51 per-state, derived) | small     |
+| Water            | `{STATE}.water.ptiles` (51 per-state)        | ~100 MB     |
+| Admin + ZIP + TZ | `US.admin.ptiles`                            | ~31 MB      |
+| Parks            | `{STATE}.parks.ptiles` (51 per-state)        | ~27 MB      |
+| Places           | `{STATE}.places.ptiles` (51 per-state)       | ~15 MB      |
+| Rail/Transit     | `{STATE}.rail.ptiles` (51 per-state)         | ~448 KB     |
+| Address Ranges   | `{STATE}.addr.ptiles` (planned)              | ~200-500 MB |
+| Routing          | `{STATE}.routing.ptiles` (planned)           | ~50 MB/TN   |
+| **Total**        |                                              | **~3.8 GB** |
 
 ### Query Performance
 
-| Layer type | Seeks | Decompress | Computation |
-|------------|-------|------------|-------------|
-| Per-cell features | 1 range read | Yes (zstd) | Iterate records |
-| Lookup grids | 1 range read | No | Binary search only |
+| Layer type        | Seeks        | Decompress | Computation        |
+| ----------------- | ------------ | ---------- | ------------------ |
+| Per-cell features | 1 range read | Yes (zstd) | Iterate records    |
+| Lookup grids      | 1 range read | No         | Binary search only |
 
 All layers: **1 HTTP range request each** (after caching headers). Total query: ~9 range requests, ~50–500 KB transferred, sub-second total.
 
@@ -1003,33 +1047,70 @@ All layers: **1 HTTP range request each** (after caching headers). Total query: 
 
 ## Data Sources
 
-| Layer | Primary Source | Secondary Source | License | Update Freq |
-|-------|---------------|-----------------|---------|-------------|
-| Buildings | OSM via Protomaps | — | ODbL | Continuous |
-| Roads | OSM via Protomaps/Geofabrik | — | ODbL | Continuous |
-| Admin Boundaries | US Census TIGER/Line | Natural Earth | Public domain | Annual |
-| Water | NHD (Nat'l Hydrography) | OSM | Public domain / ODbL | Annual |
-| Places | OSM | US Census Places | ODbL / Public domain | Continuous |
-| Parks | USGS PAD-US | OSM leisure=park | Public domain / ODbL | Annual |
-| Rail/Transit | OSM | — | ODbL | Continuous |
-| POIs | OSM | Overture Maps | ODbL / CDLA | Continuous |
-| Address Ranges | US Census TIGER/Line | — | Public domain | Annual |
+| Layer              | Primary Source               | Secondary Source | License              | Update Freq | URL                                                               |
+| ------------------ | ---------------------------- | ---------------- | -------------------- | ----------- | ----------------------------------------------------------------- |
+| Buildings          | OSM via Geofabrik state PBFs | —                | ODbL                 | Daily       | https://download.geofabrik.de/north-america/us/                   |
+| Roads              | OSM via Geofabrik state PBFs | —                | ODbL                 | Daily       | same                                                              |
+| Admin Boundaries   | US Census TIGER/Line         | Natural Earth    | Public domain        | Annual      | https://www2.census.gov/geo/tiger/GENZ2023/shp/                   |
+| Water              | NHD (Nat'l Hydrography)      | OSM              | Public domain / ODbL | Annual      | https://www.usgs.gov/national-hydrography                         |
+| Places             | OSM                          | US Census Places | ODbL / Public domain | Continuous  | same geofabrik URL                                                |
+| Parks              | USGS PAD-US                  | OSM leisure=park | Public domain / ODbL | Annual      | https://www.usgs.gov/programs/gap-analysis-project/science/pad-us |
+| Rail/Transit       | OSM                          | —                | ODbL                 | Continuous  | same geofabrik URL                                                |
+| POIs               | OSM                          | Overture Maps    | ODbL / CDLA          | Continuous  | https://data.source.coop/overture-maps/release/                   |
+| Address Ranges     | US Census TIGER/Line         | —                | Public domain        | Annual      | https://www2.census.gov/geo/tiger/TIGER2023/ADDRFEAT/             |
+| Elevation (future) | USGS 3DEP 1/3-arc-sec        | —                | Public domain        | Once        | https://www.usgs.gov/3dep                                         |
 
-### Available Cache
+### OSM PBF Download
 
-Pre-downloaded source data at `/Volumes/core/timeline-ptiles-cache/`:
+All OSM layers start from state-level PBF extracts. 51 state files, ~11 GB total.
+Download all:
 
-| Directory | Contents | Size |
-|-----------|----------|------|
-| `raw/` | 47 state `.osm.pbf` files (full OSM extracts — roads, water, POIs, etc.) | ~10 GB |
-| `buildings/` | Per-state `*-all-enriched.geojsonl` (building pipeline intermediate) | ~59 GB |
-| `tiles-old/US.ptiles` | Final v6 building file | 1.1 GB |
+```bash
+wget -i <(curl -sL https://download.geofabrik.de/north-america/us/ | \
+    grep -oP 'href="[^"]+-latest\.osm\.pbf"' | tr -d 'href="')
+```
 
-### Known External Datasets
+State naming: lowercase-hyphenated (`tennessee-latest.osm.pbf`).
 
-| Dataset | URL | Format |
-|---------|-----|--------|
-| US ZIP Code boundaries (2018) | `https://r2-public.protomaps.com/protomaps-sample-datasets/cb_2018_us_zcta510_500k.pmtiles` | PMTiles |
+NFS cache at `/mnt/core/timeline-ptiles-cache/raw/` (53 files, dated Jan 16 2026).
+
+### US Census Shapefiles
+
+| Layer     | File                          | URL                                                                                                    | Size   |
+| --------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ | ------ |
+| States    | `cb_2023_us_state_500k.zip`   | https://www2.census.gov/geo/tiger/GENZ2023/shp/cb_2023_us_state_500k.zip                               | ~8 MB  |
+| Counties  | `cb_2023_us_county_500k.zip`  | https://www2.census.gov/geo/tiger/GENZ2023/shp/cb_2023_us_county_500k.zip                              | ~18 MB |
+| ZCTAs     | `cb_2020_us_zcta520_500k.zip` | https://www2.census.gov/geo/tiger/GENZ2020/shp/cb_2020_us_zcta520_500k.zip                             | ~60 MB |
+| Timezones | `combined.json`               | https://github.com/evansiroky/timezone-boundary-builder/releases/latest/download/timezones.geojson.zip | ~25 MB |
+
+NFS cache at `/mnt/core/timeline-ptiles-cache/admin_data/`. Unzip locally — the
+uncompressed shapefiles on NFS are owned by uid 501 and unreadable.
+
+### Overture Maps (Places / POIs only)
+
+Overture building footprints PMTiles (23 GB) are BROKEN (go-pmtiles SIGSEGV,
+Python pmtiles reader fails on varint stream). **Do not use.** Use Geofabrik
+PBFs for buildings.
+
+Overture Places parquet (~9.7 GB, 16 files) is usable but currently not on disk.
+Re-download: https://data.source.coop/overture-maps/release/{YYYY-MM-DD}/theme=places/type=place/
+
+### NFS Layout
+
+```
+/mnt/core/
+  timeline-ptiles-cache/
+    raw/              53 state OSM PBFs (11 GB, Jan 16 2026)
+    admin_data/       Census shapefiles (364 MB, cached zips)
+  kino/ptiles/
+    data/
+      parquet/v2/     8-layer parquet cache per state (68 GB)
+      states/         458 .ptiles files (7 GB) — final tiles
+  data/elevation/
+    usgs-3dep/        Complete CONUS 1/3-arc-sec DEM (1,008 GB)
+```
+
+Mount: `100.94.73.109:/mnt/tmp/core -> /mnt/core/` (requires `sudo mount /mnt/core`)
 
 ---
 
@@ -1277,13 +1358,13 @@ ptiles/
 
 ### Dependencies
 
-| Library | Purpose | Layers |
-|---------|---------|--------|
-| h3 | H3 hexagonal indexing | All |
-| zstandard | Dictionary compression | All |
-| shapely | Point-in-polygon, line distance | Buildings, Water, Admin (fallback) |
-| osmium (pyosmium) | Parse OSM PBF files | Roads, Water, Rail, POIs, Places |
-| fiona/GDAL | Read shapefiles | Admin, Parks, Addresses |
+| Library           | Purpose                         | Layers                             |
+| ----------------- | ------------------------------- | ---------------------------------- |
+| h3                | H3 hexagonal indexing           | All                                |
+| zstandard         | Dictionary compression          | All                                |
+| shapely           | Point-in-polygon, line distance | Buildings, Water, Admin (fallback) |
+| osmium (pyosmium) | Parse OSM PBF files             | Roads, Water, Rail, POIs, Places   |
+| fiona/GDAL        | Read shapefiles                 | Admin, Parks, Addresses            |
 
 ### Build Order (Recommended)
 

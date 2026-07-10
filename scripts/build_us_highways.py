@@ -31,7 +31,9 @@ MAGIC = b"PTILESR\x00"
 VERSION = 2
 H3_RES = 7
 
-PBF_MAP = {"ME": "maine", "ND": "north-dakota"}
+PBF_MAP = {
+    s.abbr: s.name.lower().replace(" ", "-") for s in __import__("states").STATES
+}
 HIGHWAY_TYPES = {
     "motorway",
     "motorway_link",
@@ -294,7 +296,9 @@ def build(abbr):
 
 
 if __name__ == "__main__":
-    for abbr in ["ME", "ND"]:
+    for abbr in sorted(PBF_MAP.keys()):
+        if not get_state(abbr):
+            continue
         try:
             r = build(abbr)
             if r:

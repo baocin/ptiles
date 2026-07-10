@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
 Repair building index for broken .buildings_v8.ptiles files.
-Uses OSM PBF data to build OSM_ID -> H3 cell mapping.
+
+The original build_state_v8.py had a bug: index_entries was empty when
+index_length was computed, producing empty indices for 48/51 states.
+This script reads existing compressed blocks, cross-references OSM IDs
+against PBF data from /mnt/core/timeline-ptiles-cache/raw/ to reconstruct
+correct H3 cell assignments, then rewrites header + index in place.
+
+Usage:
+    uv run --with osmium --with h3 --with zstandard python scripts/repair_buildings_index.py AL
+    uv run --with osmium --with h3 --with zstandard python scripts/repair_buildings_index.py CA NY TX
 """
 
 import struct
@@ -24,7 +33,6 @@ HEADER_STRUCT = struct.Struct("<7sB B 3x f f f f Q I Q I Q I Q Q I 172x")
 INDEX_ENTRY_SIZE = 19
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
-# State -> PBF file name mapping (same as build_state_v8.py)
 STATE_PBF_NAMES = {
     "AL": "alabama",
     "AK": "alaska",
@@ -80,55 +88,13 @@ STATE_PBF_NAMES = {
 }
 
 
-def find_zstd_frames(data):
-    positions = []
-    pos = 0
-    while True:
-        pos = data.find(ZSTD_MAGIC, pos)
-        if pos == -1:
-            break
-        positions.append(pos)
-        pos += 1
-    return positions
-
-
-def parse_osm_id_from_block(data, n=0):
-    """Parse OSM ID of the nth building from a compressed block."""
-    _, pos = decode_string_table(data, 0)
-    for _ in range(n):
-        if pos >= len(data):
-            return None
-        rec_len = struct.unpack_from("<I", data, pos)[0]
-        pos += 4 + rec_len
-    if pos >= len(data):
-        return None
-    rec_len = struct.unpack_from("<I", data, pos)[0]
-    pos += 4
-    raw, consumed = decode_varint(data, pos)
-    return zigzag_decode(raw)
-
-
-def count_features(data):
-    n = data[0]
-    pos = 1
-    for _ in range(n):
-        slen = data[pos]
-        pos += 1 + slen
-    cnt = 0
-    while pos < len(data):
-        rec_len = struct.unpack_from("<I", data, pos)[0]
-        pos += 4 + rec_len
-        cnt += 1
-    return cnt
-
-
 class BuildingCentroidHandler(osmium.SimpleHandler):
-    """Extract buildings from PBF, compute their centroids and H3 cells."""
+    """Extract buildings from PBF, compute centroids and H3 cells."""
 
     def __init__(self, state_bbox):
         super().__init__()
         self.min_lon, self.min_lat, self.max_lon, self.max_lat = state_bbox
-        self.osm_to_cell = {}  # osm_id -> h3 cell
+        self.osm_to_cell = {}  # osm_id -> h3 cell int
 
     def way(self, w):
         if not any(tag.k == "building" for tag in w.tags if tag.v):
@@ -140,8 +106,7 @@ class BuildingCentroidHandler(osmium.SimpleHandler):
             count = 0
             for node in w.nodes:
                 try:
-                    lat = node.location.lat
-                    lon = node.location.lon
+                    lat, lon = node.location.lat, node.location.lon
                 except Exception:
                     continue
                 if count == 0:
@@ -155,151 +120,154 @@ class BuildingCentroidHandler(osmium.SimpleHandler):
                 count += 1
             if count < 3:
                 return
-            centroid_lat = lat_sum / count
-            centroid_lon = lon_sum / count
-            cell = h3.latlng_to_cell(centroid_lat, centroid_lon, H3_RES)
-            if isinstance(cell, str):
-                cell_int = int(cell, 16)
-            else:
-                cell_int = int(cell)
-            self.osm_to_cell[w.id] = cell_int
+            cell = h3.latlng_to_cell(lat_sum / count, lon_sum / count, H3_RES)
+            self.osm_to_cell[w.id] = (
+                int(cell, 16) if isinstance(cell, str) else int(cell)
+            )
         except Exception:
             pass
 
 
-def load_state_bbox(state_abbr):
-    """Get bbox for a state from the states module."""
-    from states import state_bbox, get_state
+def find_zstd_frames(data):
+    positions = []
+    pos = 0
+    while True:
+        pos = data.find(ZSTD_MAGIC, pos)
+        if pos == -1:
+            break
+        positions.append(pos)
+        pos += 1
+    return positions
 
-    s = get_state(state_abbr)
-    return state_bbox(s) if s else None
+
+def parse_osm_id(data, n=0):
+    """Parse OSM ID of the nth building (delta-encoded from block start)."""
+    _, pos = decode_string_table(data, 0)
+    for _ in range(n):
+        if pos >= len(data):
+            return None
+        rl = struct.unpack_from("<I", data, pos)[0]
+        pos += 4 + rl
+    if pos >= len(data):
+        return None
+    rl = struct.unpack_from("<I", data, pos)[0]
+    pos += 4
+    raw, consumed = decode_varint(data, pos)
+    return zigzag_decode(raw)
 
 
-def repair_file(state_abbr, dry_run=False):
-    """Repair a single state's building file using PBF data."""
+def count_features(data):
+    n = data[0]
+    pos = 1
+    for _ in range(n):
+        slen = data[pos]
+        pos += 1 + slen
+    cnt = 0
+    while pos < len(data):
+        rl = struct.unpack_from("<I", data, pos)[0]
+        pos += 4 + rl
+        cnt += 1
+    return cnt
+
+
+def repair_file(
+    state_abbr,
+    dry_run=False,
+    nfs="/mnt/core/kino/ptiles/data/states",
+    pbf_dir="/mnt/core/timeline-ptiles-cache/raw",
+):
     t0 = time.time()
-
-    nfs = "/mnt/core/kino/ptiles/data/states"
-    pbf_dir = "/mnt/core/timeline-ptiles-cache/raw"
     pbf_name = STATE_PBF_NAMES.get(state_abbr)
     if not pbf_name:
-        print(f"  No PBF mapping for {state_abbr}", flush=True)
-        return {"error": "no_pbf_mapping"}
+        return {"error": f"no pbf mapping for {state_abbr}"}
 
     ptiles_path = os.path.join(nfs, f"{state_abbr}.buildings_v8.ptiles")
     pbf_path = os.path.join(pbf_dir, f"{pbf_name}.osm.pbf")
 
-    if not os.path.exists(ptiles_path):
-        print(f"  PTILES not found: {ptiles_path}", flush=True)
-        return {"error": "no_ptiles"}
-    if not os.path.exists(pbf_path):
-        print(f"  PBF not found: {pbf_path}", flush=True)
-        return {"error": "no_pbf"}
-
-    # Read header
     with open(ptiles_path, "rb") as f:
         hdr_data = f.read(256)
     vals = HEADER_STRUCT.unpack(hdr_data)
 
-    if vals[12] > 4:  # index_length > 4 means valid index
+    if vals[12] > 4:
         print("  Valid index, skipping", flush=True)
         return {"abbr": state_abbr, "skipped": True}
 
-    block_count = vals[8]
-    dict_offset, dict_length = vals[9], vals[10]
-    blocks_offset = vals[13]
-    file_size = os.path.getsize(ptiles_path)
+    blk_off, dict_off, dict_len = vals[13], vals[9], vals[10]
+    fs = os.path.getsize(ptiles_path)
 
-    print(f"  {block_count} blocks, {file_size:,}B", flush=True)
-
-    # Read dict and blocks
     with open(ptiles_path, "rb") as f:
-        f.seek(dict_offset)
-        dict_data = f.read(dict_length)
-        f.seek(blocks_offset)
-        block_data = f.read(file_size - blocks_offset)
+        f.seek(dict_off)
+        dict_data = f.read(dict_len)
+        f.seek(blk_off)
+        block_data = f.read(fs - blk_off)
 
-    # Get frames
-    frame_starts = find_zstd_frames(block_data)
-    actual = len(frame_starts)
-    if actual == 0:
-        return {"error": "no_blocks"}
+    frames = find_zstd_frames(block_data)
+    actual = len(frames)
 
     frame_sizes = []
     for i in range(actual):
         sz = (
-            frame_starts[i + 1] - frame_starts[i]
-            if i + 1 < actual
-            else len(block_data) - frame_starts[i]
+            frames[i + 1] - frames[i] if i + 1 < actual else len(block_data) - frames[i]
         )
         frame_sizes.append(sz)
 
-    # Step 1: Parse all blocks to get OSM IDs of first building in each
     d = zstd.ZstdCompressionDict(dict_data)
     dctx = zstd.ZstdDecompressor(dict_data=d)
 
-    first_osm_ids = set()
+    # Parse OSM IDs from all blocks
+    first_ids = set()
     all_counts = []
-    total_features = 0
+    total_feat = 0
     for i in range(actual):
-        frame = block_data[frame_starts[i] : frame_starts[i] + frame_sizes[i]]
+        fr = block_data[frames[i] : frames[i] + frame_sizes[i]]
         try:
-            dec = dctx.decompress(frame)
+            dec = dctx.decompress(fr)
         except:
             all_counts.append(0)
             continue
         cnt = count_features(dec)
-        total_features += cnt
+        total_feat += cnt
         all_counts.append(cnt)
-        osm_id = parse_osm_id_from_block(dec)
-        if osm_id is not None:
-            first_osm_ids.add(osm_id)
+        oid = parse_osm_id(dec)
+        if oid is not None:
+            first_ids.add(oid)
 
-    print(
-        f"  Parsed {len(first_osm_ids)} unique first OSM IDs from {actual} blocks",
-        flush=True,
+    # Read PBF for OSM ID -> cell mapping
+    bbox = __import__("states", fromlist=["state_bbox", "get_state"]).state_bbox(
+        __import__("states", fromlist=["get_state"]).get_state(state_abbr)
     )
-
-    # Step 2: Read PBF to get OSM ID -> H3 cell mapping
-    from states import state_bbox, get_state
-
-    bbox = state_bbox(get_state(state_abbr))
-
-    print(f"  Reading PBF: {pbf_name}...", flush=True)
     handler = BuildingCentroidHandler(bbox)
     handler.apply_file(str(pbf_path), locations=True)
+    osm_cells = handler.osm_to_cell
 
-    print(f"  Got {len(handler.osm_to_cell)} buildings from PBF", flush=True)
-
-    # Step 3: Map each block's first OSM ID to its cell
     cells = []
-    failures = 0
+    fails = 0
     for i in range(actual):
-        frame = block_data[frame_starts[i] : frame_starts[i] + frame_sizes[i]]
+        fr = block_data[frames[i] : frames[i] + frame_sizes[i]]
         try:
-            dec = dctx.decompress(frame)
+            dec = dctx.decompress(fr)
         except:
             cells.append(0)
-            failures += 1
+            fails += 1
             continue
-        osm_id = parse_osm_id_from_block(dec)
-        if osm_id is not None and osm_id in handler.osm_to_cell:
-            cells.append(handler.osm_to_cell[osm_id])
+        oid = parse_osm_id(dec)
+        if oid in osm_cells:
+            cells.append(osm_cells[oid])
         else:
-            # Try sampling up to 3 buildings
+            # Try next 3 buildings in block
+            found = False
             for n in range(1, 4):
-                osm_id2 = parse_osm_id_from_block(dec, n)
-                if osm_id2 is not None and osm_id2 in handler.osm_to_cell:
-                    cells.append(handler.osm_to_cell[osm_id2])
+                oid2 = parse_osm_id(dec, n)
+                if oid2 in osm_cells:
+                    cells.append(osm_cells[oid2])
+                    found = True
                     break
-            else:
-                failures += 1
+            if not found:
                 cells.append(0)
+                fails += 1
 
-    print(f"  {failures} unresolved ({100 * failures // max(actual, 1)}%)", flush=True)
-
-    # Fill zeros
-    if failures:
+    # Fill zeros from nearest resolved cell
+    if fails:
         for i in range(actual):
             if cells[i] == 0:
                 for j in range(i - 1, -1, -1):
@@ -313,9 +281,8 @@ def repair_file(state_abbr, dry_run=False):
                             break
 
     if dry_run:
-        return {"cells": actual, "features": total_features, "failures": failures}
+        return {"cells": actual, "features": total_feat, "failures": fails}
 
-    # Build index
     entries = []
     cur_off = 0
     for i in range(actual):
@@ -329,7 +296,6 @@ def repair_file(state_abbr, dry_run=False):
         )
         cur_off += frame_sizes[i]
 
-    # Bbox
     all_lats, all_lons = [], []
     for cell in sorted(set(cells)):
         if cell:
@@ -338,11 +304,7 @@ def repair_file(state_abbr, dry_run=False):
             all_lats.append(lat)
             all_lons.append(lon)
 
-    if not all_lats:
-        return {"error": "no_valid_cells"}
-
-    nd = HEADER_SIZE
-    nl = len(dict_data)
+    nd, nl = HEADER_SIZE, len(dict_data)
     ni = 4 + len(entries) * INDEX_ENTRY_SIZE
     no = nd + nl + ni
 
@@ -356,7 +318,7 @@ def repair_file(state_abbr, dry_run=False):
             min(all_lons),
             max(all_lats),
             max(all_lons),
-            total_features,
+            total_feat,
             len(entries),
             nd,
             nl,
@@ -370,16 +332,17 @@ def repair_file(state_abbr, dry_run=False):
         write_index(f, entries)
         f.seek(no)
         f.write(block_data)
-
-    new_size = os.path.getsize(tmp)
     os.replace(tmp, ptiles_path)
+
     dt = time.time() - t0
-    print(f"  Done: {new_size:,}B, {dt:.1f}s, {failures} fails", flush=True)
+    print(
+        f"  Done: {os.path.getsize(ptiles_path):,}B, {dt:.0f}s, {fails} fails",
+        flush=True,
+    )
     return {
         "abbr": state_abbr,
         "blocks": actual,
-        "features": total_features,
-        "bytes": new_size,
+        "features": total_feat,
         "time_s": round(dt, 1),
     }
 
@@ -399,27 +362,11 @@ if __name__ == "__main__":
     elif args.states:
         targets = [s.upper() for s in args.states]
 
-    results = []
     for s in targets:
         print(f"\n=== {s} ===", flush=True)
         try:
             r = repair_file(s, dry_run=args.dry_run)
-            results.append(r)
+            if r.get("error"):
+                print(f"  ERROR: {r['error']}", flush=True)
         except Exception as e:
             print(f"  ERROR: {e}", flush=True)
-            import traceback
-
-            traceback.print_exc()
-            results.append({"abbr": s, "error": str(e)})
-
-    print("\n=== SUMMARY ===")
-    for r in results:
-        a = r.get("abbr", "??")
-        if r.get("error"):
-            print(f"  {a:2s} ERROR: {r['error']}")
-        elif r.get("skipped"):
-            print(f"  {a:2s} skipped")
-        else:
-            print(
-                f"  {a:2s} {r.get('blocks', 0):5d} blk  {r.get('features', 0):8,d} feat  {r.get('time_s', 0):5.1f}s"
-            )

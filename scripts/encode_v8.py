@@ -43,16 +43,20 @@ Block format:
 import struct
 import h3
 from shared import (
-    encode_varint, decode_varint,
-    zigzag_encode, zigzag_decode,
-    encode_coordinates, decode_coordinates,
-    coord_to_micro, micro_to_coord,
-    encode_string_u8, decode_string_u8,
+    encode_varint,
+    decode_varint,
+    zigzag_encode,
+    zigzag_decode,
+    encode_string_u8,
+    decode_string_u8,
+    coord_to_micro,
     build_string_table,
-    encode_string_table, encode_table_ref,
-    decode_string_table, decode_table_ref,
-    BTYPE_INDEX, BTYPE_REVERSE,
-    USE_MAP, USE_REVERSE,
+    encode_string_table,
+    encode_table_ref,
+    decode_string_table,
+    decode_table_ref,
+    USE_MAP,
+    USE_REVERSE,
 )
 
 
@@ -75,11 +79,14 @@ def classify_use(btype: str) -> int:
     return USE_MAP.get(btype, 0)
 
 
-def encode_building_v8(building: dict, prev_osm_id: int,
-                       cell_center: tuple[float, float],
-                       string_lookup: dict[str, int],
-                       prev_name: str = "",
-                       prev_btype: str = "") -> tuple[bytes, int, str, str]:
+def encode_building_v8(
+    building: dict,
+    prev_osm_id: int,
+    cell_center: tuple[float, float],
+    string_lookup: dict[str, int],
+    prev_name: str = "",
+    prev_btype: str = "",
+) -> tuple[bytes, int, str, str]:
     """Encode a single building record in v8 format.
 
     Args:
@@ -103,6 +110,10 @@ def encode_building_v8(building: dict, prev_osm_id: int,
     name_source = building.get("name_source", "")
     poi_osm_id = building.get("poi_osm_id", 0)
     height_m = building.get("height_m")
+    shop = building.get("shop", "")
+    amenity_val = building.get("amenity", "")
+    opening_hours = building.get("opening_hours", "")
+    business_tag = shop or amenity_val  # ponytail: shop beats amenity when both set
 
     # 1. OSM ID delta
     delta = osm_id - prev_osm_id
@@ -114,10 +125,10 @@ def encode_building_v8(building: dict, prev_osm_id: int,
     flags = (use & 0x03) | ((height_tier & 0x03) << 2)
     # Vertex count in flags or raw
     if 4 <= vertex_count <= 18:
-        flags |= ((vertex_count - 4) << 4)
+        flags |= (vertex_count - 4) << 4
         vc_raw = False
     else:
-        flags |= (0x0F << 4)  # sentinel: raw u8 follows
+        flags |= 0x0F << 4  # sentinel: raw u8 follows
         vc_raw = True
 
     buf.append(flags)
@@ -162,6 +173,10 @@ def encode_building_v8(building: dict, prev_osm_id: int,
         flags2 |= 0x08
     if height_m is not None and height_m > 0:
         flags2 |= 0x10
+    if business_tag:
+        flags2 |= 0x20  # v9: shop/amenity tag
+    if opening_hours:
+        flags2 |= 0x40  # v9: OSM opening_hours string
 
     buf.append(flags2)
 
@@ -177,13 +192,21 @@ def encode_building_v8(building: dict, prev_osm_id: int,
     if height_m is not None and height_m > 0:
         h = min(255, round(height_m * 2))  # 0.5m steps, clamp to 127.5m
         buf.append(h)
+    if business_tag:
+        buf.extend(
+            encode_table_ref(business_tag, string_lookup)
+        )  # ponytail: table ref, same as btype
+    if opening_hours:
+        buf.extend(encode_string_u8(opening_hours))
 
     return bytes(buf), osm_id, name, btype
 
 
-def encode_block_v8(buildings: list[dict], cell: int,
-                    cell_centers: dict[int, tuple[float, float]] | None = None
-                    ) -> tuple[bytes, int]:
+def encode_block_v8(
+    buildings: list[dict],
+    cell: int,
+    cell_centers: dict[int, tuple[float, float]] | None = None,
+) -> tuple[bytes, int]:
     """Encode a full v8 block with string table.
 
     Args:
@@ -204,6 +227,14 @@ def encode_block_v8(buildings: list[dict], cell: int,
             all_strings.append(b["category"])
         if b.get("name_source"):
             all_strings.append(b["name_source"])
+        shop = b.get("shop", "")
+        amenity_val = b.get("amenity", "")
+        if shop:
+            all_strings.append(shop)
+        if amenity_val:
+            all_strings.append(amenity_val)
+        if b.get("opening_hours"):
+            all_strings.append(b["opening_hours"])
 
     table, lookup = build_string_table(all_strings)
 
@@ -237,9 +268,13 @@ def encode_block_v8(buildings: list[dict], cell: int,
     return bytes(block_buf), len(buildings)
 
 
-def decode_building_v8(data: bytes, offset: int, prev_osm_id: int,
-                       cell_center: tuple[float, float],
-                       string_table: list[str]) -> dict:
+def decode_building_v8(
+    data: bytes,
+    offset: int,
+    prev_osm_id: int,
+    cell_center: tuple[float, float],
+    string_table: list[str],
+) -> dict:
     """Decode a single v8 building record.
 
     Args:
@@ -295,7 +330,7 @@ def decode_building_v8(data: bytes, offset: int, prev_osm_id: int,
     # 4. Building type
     btype_idx = data[pos]
     pos += 1
-    if btype_idx == 0xff:
+    if btype_idx == 0xFF:
         btype, consumed = decode_string_u8(data, pos)
         pos += consumed
     elif btype_idx < len(string_table):
@@ -354,8 +389,12 @@ if __name__ == "__main__":
     # Quick smoke test
     test_bldg = {
         "osm_id": 12345678,
-        "coords": [[-86.7816, 36.1627], [-86.7816, 36.1630],
-                   [-86.7813, 36.1630], [-86.7813, 36.1627]],
+        "coords": [
+            [-86.7816, 36.1627],
+            [-86.7816, 36.1630],
+            [-86.7813, 36.1630],
+            [-86.7813, 36.1627],
+        ],
         "building_type": "house",
         "name": "Test House",
         "height_m": 6.0,

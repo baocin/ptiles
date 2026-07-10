@@ -4,6 +4,8 @@
 
 [![Watch the demo](https://img.youtube.com/vi/wG7tEsdkaCs/maxresdefault.jpg)](https://youtu.be/wG7tEsdkaCs)
 
+**Live map:** **[https://steele.red/ptiles/](https://steele.red/ptiles/)** — click on any building in the US to see nearby businesses, toggle PTILES vector layers, search by business name.
+
 _Every building in the United States—77 million footprints with business names and details extracted from OpenStreetMap. The source data comes from [Protomaps PMTiles](https://protomaps.com/), which is derived from OSM's global building dataset._
 
 Binary format for GPS to feature lookup with full geometry. Per-file, per-layer, compressed.
@@ -31,6 +33,58 @@ const { ptile, ready } = definePtiles({
 await ready;
 const building = await ptile(36.16, -86.78);
 ```
+
+## PTILES vs Parquet
+
+For lat/lng feature lookups (your use case), PTILES beats Parquet at every level. Parquet is designed for columnar analytics (aggregations, scans, ad-hoc SQL). PTILES is designed for spatial point queries (single-feature lookup at a coordinate).
+
+### The key difference: query cost
+
+A PTILES query reads exactly 1 H3 cell's data. A Parquet query reads row groups filtered by column statistics — which is still way more data.
+
+|                           | Parquet (business_v1, 2.7 GB)                                                                            | PTILES (51 state files, 5 GB total)    |
+| ------------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| **Query pattern**         | Full column scan or row-group filter pushdown                                                            | O(1) H3 hash → decompress 1 block      |
+| **Data read per query**   | Scans ~2 GB (lat/lon columns) or reads 50-80 row groups (~5-10 MB each with stats pushdown)              | ~1-5 KB (1 index entry + 1 ZSTD block) |
+| **Row group stats help?** | Partially. Each 524K-row group spans half the country in lat, so a narrow bbox still touches most groups | N/A — no row groups, just H3 cells     |
+| **Browser serving**       | Needs DuckDB WASM (8 MB download, heavy init, ~500ms startup)                                            | ~5 KB JS decoder, immediate queries    |
+| **Range requests**        | 50-80 per query (reading matching row groups)                                                            | 1 per query (single block)             |
+| **Server-side query**     | Fast once loaded (DuckDB ~50ms for warm bbox query)                                                      | Sub-millisecond (in-memory index)      |
+| **Offline capable**       | Only with DuckDB engine                                                                                  | Yes, pure binary decode                |
+| **Analytics**             | Excellent (count, group by, join)                                                                        | Poor (must scan all blocks)            |
+
+### Can Parquet be optimized?
+
+Yes — three ways, but none change the browser-serving calculus:
+
+1. **Sort by H3 cell + tiny row groups.** Add an `h3_cell` column, sort by it, write with `row_group_size=16384` instead of 524288. Then `WHERE h3_cell = <query_cell>` eliminates 99.9% of row groups from stats. Still needs DuckDB WASM in the browser.
+
+2. **Partition by state.** Already have `state_abbr`. Use Hive-style partitioning: `business/state=TN/data.parquet`. Then state-level queries only scan one directory.
+
+3. **Both.** Partition by state, sort within by H3 cell. Best server-side option.
+
+### When to pick each
+
+| You want Parquet when...                      | You want PTILES when...                  |
+| --------------------------------------------- | ---------------------------------------- |
+| "Count how many restaurants have websites"    | "What businesses are at this lat/lng?"   |
+| Server-side DuckDB with fast local disk       | Static HTTP serving to browsers from S3  |
+| Ad-hoc SQL across the full dataset            | Fixed query pattern (point → features)   |
+| You already have DuckDB loaded for other work | You want a lightweight in-browser viewer |
+| Aggregations, joins, histograms               | Spatial lookups, per-cell iteration      |
+
+### The national business layer numbers
+
+|                        | Parquet (existing)                 | PTILES (51 state files)        |
+| ---------------------- | ---------------------------------- | ------------------------------ |
+| Rows                   | 41.8M POIs                         | 41.8M POIs (same data)         |
+| File size              | 2.7 GB (single file)               | 5 GB (51 files, 52 MB avg)     |
+| H3 cells per row group | 15K+ per 524K rows                 | 1 per block                    |
+| Row groups             | 80                                 | N/A — 18K+ H3 blocks per state |
+| Schema                 | 13 cols (full Foursquare+Overture) | Full records with brand/chain  |
+| State filter           | Needs partition or scan            | Natural (one file per state)   |
+
+The parquet file is kept alongside PTILES for server-side analytics: `duckdb -c "SELECT category, count(*) FROM 'business_v1.parquet' GROUP BY category"` is a natural SQL query that PTILES can't do efficiently. For the browser lookup tool, PTILES is the right format.
 
 ## Compression evolution
 

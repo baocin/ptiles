@@ -80,6 +80,9 @@ class BuildingHandler(osmium.SimpleHandler):
         btype = "yes"
         height_m = None
         name = ""
+        shop = ""
+        amenity = ""
+        opening_hours = ""
         for tag in w.tags:
             if tag.k == "building":
                 btype = tag.v
@@ -90,6 +93,12 @@ class BuildingHandler(osmium.SimpleHandler):
                     pass
             elif tag.k == "name":
                 name = tag.v
+            elif tag.k == "shop":
+                shop = tag.v
+            elif tag.k == "amenity":
+                amenity = tag.v
+            elif tag.k == "opening_hours":
+                opening_hours = tag.v
 
         osm_id = w.id
         # Use centroid of first vertex for H3 assignment
@@ -106,6 +115,9 @@ class BuildingHandler(osmium.SimpleHandler):
                 "building_type": btype,
                 "name": name,
                 "height_m": height_m,
+                "shop": shop,
+                "amenity": amenity,
+                "opening_hours": opening_hours,
             }
         )
 

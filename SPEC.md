@@ -21,7 +21,7 @@ Comprehensive offline GPS context format. Given any coordinate, return everythin
 - [Layer: Places (P)](#layer-places-p)
 - [Layer: Parks (N)](#layer-parks-n)
 - [Layer: Rail & Transit (T)](#layer-rail--transit-t)
-- [Layer: Business / POIs (B)](#layer-business--pois-b) — existing v3 format, plus Business Name Index (X)
+- [Layer: Business / POIs (B)](#layer-business--pois-b) — existing v4 format, plus Business Name Index (X)
 - [Layer: Address Ranges (D)](#layer-address-ranges-d)
 - [Layer: Routing (U)](#layer-routing-u)
 - [Combined Query](#combined-query)
@@ -34,19 +34,19 @@ Comprehensive offline GPS context format. Given any coordinate, return everythin
 
 Each layer is a separate file with its own schema optimized for its data characteristics. All files share the same header structure, spatial index format, and compression primitives.
 
-| Name                          | Magic         | Layer                   | Geometry                               | Est. Size             |
-| ----------------------------- | ------------- | ----------------------- | -------------------------------------- | --------------------- |
-| `{STATE}.buildings_v8.ptiles` | `PTILESF\x00` | Buildings               | Small polygons                         | ~1.1 GB (51 files)    |
-| `{STATE}.roads.ptiles`        | `PTILESR\x00` | Roads                   | LineStrings (split at cell boundaries) | ~1.5 GB (51 files)    |
-| `US.admin.ptiles`             | `PTILESA\x00` | Admin + ZIP + TZ        | H3 lookup grid + large polygons        | ~50-100 MB            |
-| `{STATE}.water.ptiles`        | `PTILESW\x00` | Water bodies            | Mixed polygon + linestring             | ~100 MB (51 files)    |
-| `{STATE}.places.ptiles`       | `PTILESP\x00` | Place names             | Points                                 | ~15 MB (51 files)     |
-| `{STATE}.parks.ptiles`        | `PTILESN\x00` | Parks & protected areas | H3 lookup grid + polygons              | ~27 MB (51 files)     |
-| `{STATE}.rail.ptiles`         | `PTILEST\x00` | Rail & transit          | LineStrings + points                   | ~448 KB (51 files)    |
-| `{STATE}.business.ptiles`     | `PTILESB\x00` | Business / POIs         | Points                                 | ~975 MB (51 files)    |
-| `{STATE}.business_name_index.ptiles` | `PTILESX\x00` | Business name search   | Points (letter-keyed, not spatial)     | small (derived)       |
-| `{STATE}.addr.ptiles`         | `PTILESD\x00` | Address ranges          | LineStrings + metadata                 | ~200-500 MB (planned) |
-| `{STATE}.routing.ptiles`      | `PTILESU\x00` | Routing                 | Portal graphs (no geometry)            | ~50 MB/TN (planned)   |
+| Name                                 | Magic         | Layer                   | Geometry                               | Est. Size             |
+| ------------------------------------ | ------------- | ----------------------- | -------------------------------------- | --------------------- |
+| `{STATE}.buildings_v8.ptiles`        | `PTILESF\x00` | Buildings               | Small polygons                         | ~1.1 GB (51 files)    |
+| `{STATE}.roads.ptiles`               | `PTILESR\x00` | Roads                   | LineStrings (split at cell boundaries) | ~1.5 GB (51 files)    |
+| `US.admin.ptiles`                    | `PTILESA\x00` | Admin + ZIP + TZ        | H3 lookup grid + large polygons        | ~50-100 MB            |
+| `{STATE}.water.ptiles`               | `PTILESW\x00` | Water bodies            | Mixed polygon + linestring             | ~100 MB (51 files)    |
+| `{STATE}.places.ptiles`              | `PTILESP\x00` | Place names             | Points                                 | ~15 MB (51 files)     |
+| `{STATE}.parks.ptiles`               | `PTILESN\x00` | Parks & protected areas | H3 lookup grid + polygons              | ~27 MB (51 files)     |
+| `{STATE}.rail.ptiles`                | `PTILEST\x00` | Rail & transit          | LineStrings + points                   | ~448 KB (51 files)    |
+| `{STATE}.business.ptiles`            | `PTILESB\x00` | Business / POIs         | Points                                 | ~975 MB (51 files)    |
+| `{STATE}.business_name_index.ptiles` | `PTILESX\x00` | Business name search    | Points (letter-keyed, not spatial)     | small (derived)       |
+| `{STATE}.addr.ptiles`                | `PTILESD\x00` | Address ranges          | LineStrings + metadata                 | ~200-500 MB (planned) |
+| `{STATE}.routing.ptiles`             | `PTILESU\x00` | Routing                 | Portal graphs (no geometry)            | ~50 MB/TN (planned)   |
 
 **Why separate files?** Each data type has radically different feature density (77M buildings vs 3K admin regions), geometry characteristics (5-vertex polygons vs 50K-vertex state borders), optimal compression, and query patterns. Separate files let each be independently optimized, cached, and updated.
 
@@ -69,7 +69,7 @@ All PTiles files use these common structures.
 | ------ | ---- | ------- | ------------- | ---------------------------------------------- | --------------------------------------------------------------- |
 | 0      | 7    | bytes   | magic_prefix  | `PTILES` + layer byte (see table)              |
 | 7      | 1    | uint8   | magic_null    | `\x00` terminator                              |
-|        | 8    | 1       | uint8         | version                                        | Schema version (buildings: 8, roads: 2, business: 2, others: 1) |
+|        | 8    | 1       | uint8         | version                                        | Schema version (buildings: 8, roads: 2, business: 4, others: 1) |
 | 9      | 3    | —       | reserved      | Alignment padding                              |
 | 12     | 4    | float32 | min_lat       | Bounding box south                             |
 | 16     | 4    | float32 | min_lon       | Bounding box west                              |
@@ -207,22 +207,26 @@ Range: bytes=12345678-12348000   # Single block per query
 
 See [README.md](./README.md) for the full v8 building schema. Summary:
 
-| Field         | Encoding            | Description                              |
-| ------------- | ------------------- | ---------------------------------------- |
-| osm_id        | varint (delta)      | Delta from previous OSM ID in block      |
-| vertex_count  | uint8               | Polygon vertex count (max 255)           |
-| first_lon     | int32               | First longitude × 100,000                |
-| first_lat     | int32               | First latitude × 100,000                 |
-| deltas        | zigzag varint pairs | Delta lon/lat per subsequent vertex      |
-| flags         | uint8               | Bitmask for optional fields              |
-| btype_idx     | uint8               | Building type (20 indexed + 255=custom)  |
-| [name]        | uint16 len + UTF-8  | If flags & 0x01                          |
-| [category]    | uint8 len + UTF-8   | If flags & 0x02                          |
-| [name_source] | uint8 len + UTF-8   | If flags & 0x04                          |
-| [poi_osm_id]  | uint64              | If flags & 0x08                          |
-| [height]      | uint8               | If flags & 0x10 (0.5 m steps, 0–127.5 m) |
+| Field          | Encoding            | Description                                                   |
+| -------------- | ------------------- | ------------------------------------------------------------- |
+| osm_id         | varint (delta)      | Delta from previous OSM ID in block                           |
+| flags          | uint8               | use_class (bits 0-1) + height_tier (2-3) + vertex_count (4-7) |
+| [vertex_raw]   | uint8               | Only if vertex_count sentinel (0x0F)                          |
+| first_lon      | i16                 | Cell-relative, microdegree offset                             |
+| first_lat      | i16                 | Cell-relative, microdegree offset                             |
+| deltas         | zigzag varint pairs | Delta lon/lat per subsequent vertex                           |
+| btype_idx      | uint8               | Building type (string table ref, 0xFF=inline)                 |
+| [btype_inline] | uint8 len + UTF-8   | Only if btype_idx == 0xFF                                     |
+| flags2         | uint8               | Extended flags for optional fields                            |
+| [name]         | uint8 table_ref     | If flags2 & 0x01                                              |
+| [category]     | uint8 table_ref     | If flags2 & 0x02                                              |
+| [name_source]  | uint8 table_ref     | If flags2 & 0x04                                              |
+| [poi_osm_id]   | uint64              | If flags2 & 0x08                                              |
+| [height_raw]   | uint8               | If flags2 & 0x10 (0.5 m steps, 0–127.5 m)                     |
 
-**Query:** GPS → H3 cell → binary search → decompress → point-in-polygon test.
+**flags2 unused bits (v8):** 0x20, 0x40, 0x80 are free. These are reserved for v9: `amenity` (0x20, global amenity type index), `parking` (0x40, parking type index), `building_levels` (u8, 0x80).
+
+**Query:** GPS → H3 cell → HashMap lookup → decompress → point-in-polygon test.
 
 **Size:** ~1.14 GB (77M buildings, ~15 bytes/building).
 
@@ -738,7 +742,7 @@ Same approach as roads: point-to-linestring distance for lines, point-to-point d
 
 ## Layer: Business / POIs (B)
 
-**Magic:** `PTILESB\x00` — **Status:** Implemented (v3) — one file per state, `{STATE}.business.ptiles`
+**Magic:** `PTILESB\x00` — **Status:** Implemented (v4) — one file per state, `{STATE}.business.ptiles`
 
 Unified business/POI point data joined from Overture Places and Foursquare OS Places, deduplicated across sources and cross-referenced against chain/brand indices. This is a from-scratch dataset — not the generic OSM POI layer described in earlier drafts of this spec. It covers standalone businesses regardless of whether they sit inside a building footprint (unlike the Buildings layer's embedded business fields, which only cover buildings OSM already resolved).
 
@@ -746,40 +750,120 @@ Built by `scripts/build_full_ptilesb.py`. Verified against a real file:
 
 ```
 $ python3 -c "from shared import read_header; print(read_header(open('TN.business.ptiles','rb')))"
-{'magic': b'PTILESB', 'version': 3, 'feature_count': 829528, 'block_count': 18162,
+{'magic': b'PTILESB', 'version': 4, 'feature_count': 829528, 'block_count': 18162,
  'dict_offset': 256, 'dict_length': 524288, 'index_offset': 524544,
  'index_length': 345082, 'blocks_offset': 869626, 'aux_offset': 0, 'aux_length': 0}
 ```
 
-Header, spatial index (H3 res 7, 19-byte entries), and zstd dictionary framing all follow the [common structures](#common-structures) above — `aux_offset`/`aux_length` are unused (0) for this layer.
+Header, spatial index (H3 res 7, 19-byte entries in v1 index or 37-byte entries with per-cell bbox in v2+ index), and zstd dictionary framing all follow the [common structures](#common-structures) above — `aux_offset`/`aux_length` are unused (0) for this layer.
 
-### Record Format (v3)
+### Record Format (v4)
 
 Unlike other per-cell layers, each business record is **length-prefixed** (`uint32 record_len` covering everything after the prefix) so decoders can skip records without fully parsing variable-length fields — this is what the name-index builder relies on to stream every block. IDs are a 64-bit `unified_id` (`sha256("{source}:{source_id}")[:8]`, little-endian), not an OSM node ID — Overture/Foursquare records have no shared native ID space.
 
-| Field            | Encoding              | Description                                                          |
-| ---------------- | --------------------- | ---------------------------------------------------------------------- |
-| record_len       | uint32                | Byte length of everything below (for record skipping)                  |
-| unified_id       | varint (zigzag delta) | Delta from previous `unified_id` in block (sorted ascending)            |
-| lon              | int32                 | Longitude × 100,000                                                    |
-| lat              | int32                 | Latitude × 100,000                                                     |
-| name             | uint16 len + UTF-8    | Business name (required, may be empty)                                 |
-| category_idx     | uint8                 | Index into the per-file category list (0 = none)                       |
-| flags            | uint8                 | Bitmask for optional fields                                             |
-| [phone]          | uint8 len + UTF-8     | If flags & 0x01                                                        |
-| [website]        | uint8 len + UTF-8     | If flags & 0x02                                                        |
-| [address]        | uint16 len + UTF-8    | If flags & 0x04 — freeform street address                              |
-| [brand]          | uint8 len + UTF-8     | If flags & 0x08 — resolved brand/chain name                            |
-| [chain_count]    | uint8                 | If flags & 0x80 — number of locations for this chain (capped at 255)   |
+| Field            | Encoding              | Description                                                                      |
+| ---------------- | --------------------- | -------------------------------------------------------------------------------- |
+| record_len       | uint32                | Byte length of everything below (for record skipping)                            |
+| unified_id       | varint (zigzag delta) | Delta from previous `unified_id` in block (sorted ascending)                     |
+| lon              | int32                 | Longitude × 100,000                                                              |
+| lat              | int32                 | Latitude × 100,000                                                               |
+| name             | uint16 len + UTF-8    | Business name (required, may be empty)                                           |
+| category_idx     | uint8                 | Index into the per-file category list (0 = none)                                 |
+| flags            | uint8                 | Bitmask for optional fields (v4 layout — see below)                              |
+| [phone]          | uint8 len + UTF-8     | If flags & 0x01                                                                  |
+| [website]        | uint8 len + UTF-8     | If flags & 0x02                                                                  |
+| [address]        | uint16 len + UTF-8    | If flags & 0x04 — freeform street address                                        |
+| [brand]          | uint8 len + UTF-8     | If flags & 0x08 — resolved brand/chain name                                      |
+| [chain_count]    | uint8                 | If flags & 0x80 — number of locations for this chain (capped at 255)             |
+| [amenities]      | variable              | If flags & 0x10 — amenities block (see below)                                    |
 | [ext_flags]      | uint16                | Present only if any extended attribute below is set — omitted entirely otherwise |
-| [source_type]    | uint8                 | If ext_flags & 0x01 — 1 = Overture, 2 = Foursquare                      |
-| [source_id]      | uint16 len + UTF-8    | If ext_flags & 0x02 — original per-source record ID                    |
-| [confidence]     | uint8                 | If ext_flags & 0x04 — match/dedup confidence, 0-100                    |
-| [unified_id_alt] | uint64                | If ext_flags & 0x08 — alternate unified ID (merged duplicate)          |
+| [source_type]    | uint8                 | If ext_flags & 0x01 — 1 = Overture, 2 = Foursquare                               |
+| [source_id]      | uint16 len + UTF-8    | If ext_flags & 0x02 — original per-source record ID                              |
+| [confidence]     | uint8                 | If ext_flags & 0x04 — match/dedup confidence, 0-100                              |
+| [unified_id_alt] | uint64                | If ext_flags & 0x08 — alternate unified ID (merged duplicate)                    |
+| [star_rating]    | uint8                 | If ext_flags & 0x10 — rating × 10 (e.g., 42 = 4.2 stars)                         |
+| [opening_hours]  | variable              | If ext_flags & 0x20 — opening hours block (see below)                            |
+| [source_version] | uint32                | If ext_flags & 0x40 — Overture `version` field                                   |
+| [updated]        | uint32                | If ext_flags & 0x80 — last-modified epoch days (days since 2020-01-01)           |
 
-Bits 0x10, 0x20, and 0x40 of `flags` are reserved/unused in the v3 encoder (earlier drafts of this format used 0x10 for a 2-bit `operating_status` and 0x20/0x40 for emails/socials; the current production encoder does not emit them, but decoders should tolerate them being set and skip the corresponding sub-fields per the v1 layout for backward compatibility with pre-v3 files).
+### Flags Byte (v4)
 
-**Category index:** `category_idx` is per-file, not global — each `{STATE}.business.ptiles` build assigns indices 1-254 to that state's categories sorted by frequency (0 = uncategorized, 255 unused/reserved). The mapping is written to a sidecar `{STATE}.business_categories.json` (`{"categories": [...], "total_places": N, "version": 3, "format": "unified-poi"}`) — `categories[category_idx - 1]` gives the category string. Decoders needing category names must load this sidecar; it is not embedded in the `.ptiles` file itself.
+```
+bit 0x01 — phone
+bit 0x02 — website
+bit 0x04 — address (freeform)
+bit 0x08 — brand/chain name
+bit 0x10 — amenities block (new in v4)
+bit 0x20 — operating_status (2 bits, see below)
+bit 0x40 — unused
+bit 0x80 — chain_count
+```
+
+**operating_status** (v4, bits 0x20+0x40 repurposed): When `flags & 0x10` is **not** set, bits 5-6 carry the status: 00 = open, 01 = closed, 10 = temporarily_closed, 11 = unknown. When `flags & 0x10` **is** set, bits 5-6 are repurposed for amenities — status becomes a sub-field of the amenities block and defaults to open (00).
+
+### Amenities Block
+
+Present when `flags & 0x10`. Encoding:
+
+```
+amenities_flags  uint16   Bitmask for amenity fields present
+[drive_through]  —        If bit 0x0001 (boolean flag, no data — presence = yes)
+[wheelchair]     —        If bit 0x0002 (boolean flag, no data — presence = wheelchair_accessible)
+[internet]       —        If bit 0x0004 (boolean flag, no data — presence = has internet_access)
+[smoking]        uint8    If bit 0x0008 — 0=no, 1=yes, 2=designated, 3=separated
+[capacity]       varint   If bit 0x0010 — seating/standing capacity
+[oper_status]    uint8    If bit 0x0020 — 0=open, 1=closed, 2=temporarily_closed
+[amenity_type]   uint8    If bit 0x0040 — index into amenity sidecar (see below)
+[amenity_extra]  uint16 len + UTF-8  If bit 0x0080 — freeform amenity description
+```
+
+Amenity types use a global index (not per-state), stored in a sidecar `amenities.json` shipped with the decoder:
+
+```
+0  — (none)
+1  — parking
+2  — parking_surface
+3  — parking_underground
+4  — parking_multi_storey
+5  — atm
+6  — vending_machine
+7  — toilet
+8  — shower
+9  — drinking_water
+10 — fuel
+```
+
+Boolean flags (drive_through, wheelchair, internet) cost zero bytes when absent — just the amenities_flags bit. When present, they cost nothing beyond the bit: the presence of the flag bit itself is the value.
+
+### Opening Hours Block (v4)
+
+Present when `ext_flags & 0x20`. Compact encoding for Overture-structured opening hours:
+
+```
+range_count    uint8     Number of day-range entries (0 = no hours known, meaning "assume open")
+[range 0..N]   { u8 day_bitmask, u16 open_minutes, u16 close_minutes }  — 5 bytes each
+```
+
+**day_bitmask:** 7 bits, Sun=bit0, Mon=bit1, …, Sat=bit6. Multi-day ranges (e.g., "Mo-Fr") set multiple bits in one entry.
+
+**open_minutes / close_minutes:** Minutes since midnight (0-1439). 24-hour businesses use 0 and 1439. For overnight spans (e.g., 22:00–02:00), close_minutes > 1439 is allowed (stored as minutes from Sunday midnight) and decoded by adding 1440 per overflow day.
+
+**Query check (is open now?):**
+
+1. Get current time in the business's local timezone (from admin layer reverse geocode).
+2. Compute `now_minutes = hour * 60 + minute`, `day_bit = 1 << weekday()`.
+3. For each range where `day_bitmask & day_bit`: check `open_minutes <= now_minutes < close_minutes`. If any matches, open. If none, closed.
+
+**Typical sizes:** A restaurant with "Mo-Fr 09:00-22:00, Sa 10:00-23:00" = 2 ranges × 5 bytes = 10 bytes. A 24/7 gas station: 1 range (all-days bitmask) = 5 bytes. Range_count=0 means "no structured hours — assume open" (handles the common case where Overture has no hours data).
+
+### v3 → v4 Migration Notes
+
+- `flags` bits 0x10/0x20/0x40 are no longer reserved. v4 decoders parse them per the table above.
+- v3 files (`header.version == 3`) set flags 0x10/0x20/0x40 to zero. v4 decoders reading v3 files fall back to the v3 layout: skip amenities, treat oper_status as v1-style (bits 0x10 closed + 0x02 temp → 2-bit status), and ignore ext_flags bits 0x10–0x80.
+- `confidence` moves from the v3 source-level ext_flags field (bit 0x04) to the record-level confidence concept — v4 keeps it in ext_flags for backward compat but adds source metadata (version, updated) in new ext_flags bits.
+- US-wide space increase from v3 → v4: ~5% (amenities booleans compress to <1 bit each, opening hours repeat heavily under zstd, star_rating u8 compresses well). TN 54 MB → ~57 MB.
+
+**Category index:** `category_idx` is per-file, not global — each `{STATE}.business.ptiles` build assigns indices 1-254 to that state's categories sorted by frequency (0 = uncategorized, 255 unused/reserved). The mapping is written to a sidecar `{STATE}.business_categories.json` (`{"categories": [...], "total_places": N, "version": 4, "format": "unified-poi"}`) — `categories[category_idx - 1]` gives the category string. Decoders needing category names must load this sidecar; it is not embedded in the `.ptiles` file itself.
 
 ### Query: "What businesses are nearby?"
 
@@ -797,37 +881,37 @@ Built for name-prefix search (e.g. autocomplete/typeahead over business names), 
 **Key scheme:** the spatial index's `h3_cell` field is repurposed as a **letter key** (0-27), not an actual H3 cell:
 
 | Key  | Meaning                                       |
-| ---- | ---------------------------------------------- |
-| 0-25 | `a`-`z` — first character of name, lowercased  |
-| 26   | Name starts with a digit or other non-letter   |
-| 27   | Empty or missing name                          |
+| ---- | --------------------------------------------- |
+| 0-25 | `a`-`z` — first character of name, lowercased |
+| 26   | Name starts with a digit or other non-letter  |
+| 27   | Empty or missing name                         |
 
 Index entries are sorted by key ascending; a client wanting all businesses starting with `"s"` looks up key `18` directly (or does a small linear/binary scan since there are at most 28 entries — no need for H3 math). Within a block, records are in the same relative order they were encountered while streaming the source `.business.ptiles` file (not alphabetically sub-sorted).
 
 Each name-index record is a **reduced-field, self-contained** re-encoding of the corresponding business record — it does not reference back into the business file by offset, only by a synthetic cross-reference `uid`:
 
-| Field        | Encoding           | Description                                                                                     |
-| ------------ | ------------------ | ------------------------------------------------------------------------------------------------- |
-| record_len   | uint32             | Byte length of everything below                                                                   |
-| name         | uint16 len + UTF-8 | Full business name                                                                                 |
-| lat_micro    | int32              | Latitude × 100,000                                                                                 |
-| lon_micro    | int32              | Longitude × 100,000                                                                                |
+| Field        | Encoding           | Description                                                                                                                                                               |
+| ------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| record_len   | uint32             | Byte length of everything below                                                                                                                                           |
+| name         | uint16 len + UTF-8 | Full business name                                                                                                                                                        |
+| lat_micro    | int32              | Latitude × 100,000                                                                                                                                                        |
+| lon_micro    | int32              | Longitude × 100,000                                                                                                                                                       |
 | uid          | uint32             | Sequential ID assigned during the index build (0-based, in block-iteration order over the source file) — **not stable across rebuilds**, and not the same as `unified_id` |
-| category_idx | uint8              | Copied from the source record (same per-state category sidecar applies)                           |
-| flags        | uint8              | Bitmask — only phone (0x01), website (0x02), brand (0x08) are preserved; address/chain/ext-attrs are dropped |
-| [phone]      | uint8 len + UTF-8  | If flags & 0x01                                                                                    |
-| [website]    | uint8 len + UTF-8  | If flags & 0x02                                                                                    |
-| [brand]      | uint8 len + UTF-8  | If flags & 0x08                                                                                    |
+| category_idx | uint8              | Copied from the source record (same per-state category sidecar applies)                                                                                                   |
+| flags        | uint8              | Bitmask — only phone (0x01), website (0x02), brand (0x08) are preserved; address/chain/ext-attrs are dropped                                                              |
+| [phone]      | uint8 len + UTF-8  | If flags & 0x01                                                                                                                                                           |
+| [website]    | uint8 len + UTF-8  | If flags & 0x02                                                                                                                                                           |
+| [brand]      | uint8 len + UTF-8  | If flags & 0x08                                                                                                                                                           |
 
 **Caveat for implementers:** `uid` is a fresh counter over the source file's block-by-block, then-record-by-record iteration order at index-build time — it has no relationship to `unified_id` and will change if the source `.business.ptiles` is rebuilt (even with identical data, if H3 iteration order changes). Do not persist `uid` across rebuilds or use it as a durable cross-file key; if a stable join back to the full business record is needed, re-match on `(name, lat_micro, lon_micro)` or extend the index format to carry `unified_id` instead.
 
 ### Estimated Size
 
-| Metric                            | Value                               |
-| ---------------------------------- | -------------------------------------- |
-| TN businesses (verified)           | 829,528 records / 18,162 H3 blocks     |
-| `TN.business.ptiles` file size     | ~54 MB                                 |
-| US total (51 states, extrapolated) | ~975 MB                                |
+| Metric                             | Value                              |
+| ---------------------------------- | ---------------------------------- |
+| TN businesses (verified)           | 829,528 records / 18,162 H3 blocks |
+| `TN.business.ptiles` file size     | ~54 MB                             |
+| US total (51 states, extrapolated) | ~975 MB                            |
 
 ---
 
@@ -1019,20 +1103,20 @@ def query_all(lat, lng, layers):
 
 ### Storage Budget
 
-| Layer            | File                                         | Est. Size   |
-| ---------------- | -------------------------------------------- | ----------- |
-| Buildings        | `{STATE}.buildings_v8.ptiles` (51 per-state) | ~1.1 GB     |
-| Roads            | `{STATE}.roads.ptiles` (51 per-state)        | ~1.5 GB     |
-| Business / POIs  | `{STATE}.business.ptiles` (51 per-state)     | ~975 MB     |
-| Business name index | `{STATE}.business_name_index.ptiles` (51 per-state, derived) | small     |
-| Water            | `{STATE}.water.ptiles` (51 per-state)        | ~100 MB     |
-| Admin + ZIP + TZ | `US.admin.ptiles`                            | ~31 MB      |
-| Parks            | `{STATE}.parks.ptiles` (51 per-state)        | ~27 MB      |
-| Places           | `{STATE}.places.ptiles` (51 per-state)       | ~15 MB      |
-| Rail/Transit     | `{STATE}.rail.ptiles` (51 per-state)         | ~448 KB     |
-| Address Ranges   | `{STATE}.addr.ptiles` (planned)              | ~200-500 MB |
-| Routing          | `{STATE}.routing.ptiles` (planned)           | ~50 MB/TN   |
-| **Total**        |                                              | **~3.8 GB** |
+| Layer               | File                                                         | Est. Size   |
+| ------------------- | ------------------------------------------------------------ | ----------- |
+| Buildings           | `{STATE}.buildings_v8.ptiles` (51 per-state)                 | ~1.1 GB     |
+| Roads               | `{STATE}.roads.ptiles` (51 per-state)                        | ~1.5 GB     |
+| Business / POIs     | `{STATE}.business.ptiles` (51 per-state)                     | ~975 MB     |
+| Business name index | `{STATE}.business_name_index.ptiles` (51 per-state, derived) | small       |
+| Water               | `{STATE}.water.ptiles` (51 per-state)                        | ~100 MB     |
+| Admin + ZIP + TZ    | `US.admin.ptiles`                                            | ~31 MB      |
+| Parks               | `{STATE}.parks.ptiles` (51 per-state)                        | ~27 MB      |
+| Places              | `{STATE}.places.ptiles` (51 per-state)                       | ~15 MB      |
+| Rail/Transit        | `{STATE}.rail.ptiles` (51 per-state)                         | ~448 KB     |
+| Address Ranges      | `{STATE}.addr.ptiles` (planned)                              | ~200-500 MB |
+| Routing             | `{STATE}.routing.ptiles` (planned)                           | ~50 MB/TN   |
+| **Total**           |                                                              | **~3.8 GB** |
 
 ### Query Performance
 

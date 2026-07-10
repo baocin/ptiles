@@ -178,6 +178,112 @@ def decompress_block(data: bytes, dict_data: bytes) -> bytes:
 
 
 # ===========================================================================
+# Single-frame writer: concat all blocks, compress once
+# ===========================================================================
+# The file has the same header + dictionary layout, but instead of
+# per-cell ZSTD frames, the entire data section is one ZSTD frame
+# containing all blocks concatenated. The index maps cells to offsets
+# within this single decompressed blob.
+#
+# block_count is set to the number of cells (same as before).
+# index entries use blockOffset as offset-within-decompressed-blob
+# and blockLength as the data length at that offset.
+
+import os
+
+
+def write_ptiles_single_frame(
+    output_path: str,
+    magic: bytes,
+    version: int,
+    header_meta: dict,
+    dict_data: bytes,
+    blocks: dict,
+    compression_level: int = 12,
+):
+    """Write a PTILES file as a single uncompressed blob.
+
+    No ZSTD. The block section is raw concatenated data. The index
+    maps cells to offset+length within this blob. Zero decompress at read.
+
+    Use empty dict_data (b"") for no dictionary — the header just skips it.
+    When dict_data is non-empty, it's stored but not used for compression.
+    """
+    sample = next(iter(blocks.values()))
+    has_fc = isinstance(sample, tuple)
+    blocks_raw = {k: v[0] if has_fc else v for k, v in blocks.items()}
+
+    sorted_cells = sorted(blocks_raw.keys())
+    n_cells = len(sorted_cells)
+    if n_cells == 0:
+        raise ValueError("No blocks to write")
+
+    # Build concatenated buffer
+    concat_data = bytearray()
+    cell_offsets = {}
+    for c in sorted_cells:
+        raw = blocks_raw[c]
+        cell_offsets[c] = (len(concat_data), len(raw))
+        concat_data.extend(raw)
+
+    # File layout
+    dict_offset = 256
+    dict_length = len(dict_data)
+    index_size = 4 + n_cells * 19
+    index_offset = dict_offset + dict_length
+    index_offset = (index_offset + 3) & ~3
+    blocks_offset = index_offset + index_size
+    blocks_offset = (blocks_offset + 3) & ~3
+
+    with open(output_path, "wb") as f:
+        write_header(
+            f,
+            magic,
+            version,
+            header_meta.get("min_lat", 0),
+            header_meta.get("min_lon", 0),
+            header_meta.get("max_lat", 0),
+            header_meta.get("max_lon", 0),
+            header_meta.get("feature_count", 0),
+            n_cells,
+            dict_offset,
+            dict_length,
+            index_offset,
+            index_size,
+            blocks_offset,
+        )
+        if dict_data:
+            f.write(dict_data)
+        pad = index_offset - f.tell()
+        if pad > 0:
+            f.write(b"\x00" * pad)
+
+        # Index
+        f.write(struct.pack("<I", n_cells))
+        for c in sorted_cells:
+            off, length = cell_offsets[c]
+            fc = 0
+            if has_fc:
+                fc = blocks[c][1]
+            buf = struct.pack("<Q", c)
+            buf += off.to_bytes(6, "little")
+            buf += length.to_bytes(3, "little")
+            buf += struct.pack("<H", min(fc, 65535))
+            f.write(buf)
+
+        pad = blocks_offset - f.tell()
+        if pad > 0:
+            f.write(b"\x00" * pad)
+
+        f.write(bytes(concat_data))
+
+    total_size = os.path.getsize(output_path)
+    print(
+        f"  raw: {n_cells} cells, {total_size / 1024 / 1024:.1f} MB -> {os.path.basename(output_path)}"
+    )
+
+
+# ===========================================================================
 # Building Type Index (v6, extended v8)
 # ===========================================================================
 

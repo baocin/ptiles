@@ -88,29 +88,32 @@ The parquet file is kept alongside PTILES for server-side analytics: `duckdb -c 
 
 ## Compression evolution
 
-| Version | What changed                                                                                                                                                                             | Per-building savings |
-| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| v1      | Raw coordinates (i32), inline strings                                                                                                                                                    | ~80 bytes/building   |
-| v6      | Delta OSM IDs, indexed building types, zigzag varint coords                                                                                                                              | ~15 bytes/building   |
-| **v7**  | **Wall segment encoding** — 2 bytes per wall (angle+distance with step quantization) instead of full coordinate deltas                                                                   | ~10 bytes/building   |
-| **v8**  | **String table + per-cell string dedup**, cell-relative i16 first vertex (instead of full microdegree), optional fields in flags2 byte (name, category, name_source, poi_osm_id, height) | ~4 bytes/building    |
+| Version | What changed                                                                                                                                               | Per-building savings |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| v1      | Raw coordinates (i32), inline strings                                                                                                                      | ~80 bytes/building   |
+| v6      | Delta OSM IDs, indexed building types, zigzag varint coords                                                                                                | ~15 bytes/building   |
+| **v7**  | **Wall segment encoding** — 2 bytes per wall (angle+distance with step quantization) instead of full coordinate deltas                                     | ~10 bytes/building   |
+| **v8**  | **String table + per-cell string dedup**, cell-relative i16 first vertex, optional fields in flags2 byte (name, category, name_source, poi_osm_id, height) | ~4 bytes/building    |
+| **v9**  | **OSM business tags** — shop, amenity, opening_hours packed into flags2 bits (0x20, 0x40); no schema change, v8-compatible decode                          | +0 bytes/building    |
 
-v8 builds on v7's wall encoding but adds per-block string deduplication: building types, names, categories, and name sources are stored once in a string table at the start of each block, referenced by 1-byte index. This eliminates repeated strings like "residential" that made up 60% of the per-record overhead.
+v8 builds on v7's wall encoding but adds per-block string deduplication: building types, names, categories, and name sources are stored once in a string table at the start of each block, referenced by 1-byte index.
+
+v9 adds OSM business tags to the building record without increasing size — shop and amenity use flags2 bits (0x20, 0x40), opening_hours is a table ref like name. Backward-compatible with v8 decoders.
 
 ## Current file sizes
 
-| Layer     | Files        | Format | Total size | Features   | Bytes/feature         |
-| --------- | ------------ | ------ | ---------- | ---------- | --------------------- |
-| Buildings | 51 per-state | v8     | ~1.1 GB    | 77M        | ~15 avg, ~4 with name |
-| Roads     | 51 per-state | v2     | ~1.5 GB    | 56M        | ~28                   |
-| Water     | 51 per-state | v1     | ~100 MB    | 12M        | ~8                    |
-| Business  | 51 per-state | v2     | ~975 MB    | 75M POIs   | ~13                   |
-| Places    | 51 per-state | v1     | ~15 MB     | 50K        | ~300                  |
-| Rail      | 51 per-state | v1     | ~448 KB    | 10K        | ~45                   |
-| Parks     | 51 per-state | v1     | ~27 MB     | 200K       | ~135                  |
-| Admin     | 1 US-wide    | v1     | ~31 MB     | grid cells | variable              |
-
-**Total: ~3.8 GB for the full US, all layers.**
+|| Layer | Files | Format | Total size | Features | Bytes/feature |
+|| --------- | ------------ | ------ | --------------- | ---------- | --------------------- |
+|| Buildings | 51 per-state | v9 | ~1.1 GB | 77M | ~15 avg, ~4 with name |
+|| Roads | 13 per-state | v2 | ~700 MB | 9M | ~78 |
+|| Water | 51 per-state | v1 | ~1.2 GB | 12M | ~100 |
+|| Business | 51 per-state | v4 | ~2.0 GB | 7.9M POIs | ~253 |
+|| Address | 51 per-state | v1 | ~120 MB | 1.2M | ~100 |
+|| Places | 51 per-state | v1 | ~15 MB | 50K | ~300 |
+|| Rail | 51 per-state | v1 | ~448 KB | 10K | ~45 |
+|| Parks | 51 per-state | v1 | ~27 MB | 200K | ~135 |
+|| Admin | 1 US-wide | v1 | ~31 MB | grid cells | variable |
+|| **Total** | | | **~5.2 GB** | | |
 
 ## Format evolution milestones
 
@@ -207,13 +210,26 @@ Centroid is computed from coordinate mean (not stored).
 
 ## Hosted tiles
 
-All 51 states + DC building files available at:
+All 51 states + DC files available at:
 
 ```
-https://maps.mydatatimeline.com/maps/{ABBR}.buildings_v8.ptiles
+https://maps.mydatatimeline.com/maps/v4-20260711/{ST}.{layer}.ptiles
 ```
 
-Roads, water, business, places, rail, parks, and admin layers also hosted at the same base URL.
+v4 build (2026-07-11) replaces all prior tile sets. Layers:
+
+| Layer                   | Format | Source                     |
+| ----------------------- | ------ | -------------------------- |
+| buildings_v9            | v9     | OSM PBF                    |
+| business_v4             | v4     | Overture Maps places       |
+| highways_v2             | v2     | OSM highways               |
+| business_name_index     | v1     | Business name search index |
+| address_v1              | v1     | OSM address points         |
+| water_v1                | v1     | OSM water features         |
+| places_v1               | v1     | OSM places                 |
+| parks_v1                | v1     | OSM parks                  |
+| rail_v1                 | v1     | OSM rail lines             |
+| roads/{ST}.roads.ptiles | v2     | OSM roads                  |
 
 ## Building
 
@@ -239,3 +255,51 @@ uv run --with osmium --with h3 --with zstandard --with shapely \
 
 MIT — format spec and build scripts.
 Building data derived from OpenStreetMap (ODbL) and Overture Maps (Community Dataset Agreement).
+
+## Direct Downloads (v4 — 2026-07-11)
+
+All 51 states + DC, 10 layers, 5.2 GB total.
+
+### Buildings v9
+
+```
+maps.mydatatimeline.com/maps/v4-20260711/{ST}.buildings_v9.ptiles
+```
+
+77M+ footprints with OSM tags (shop, amenity, opening_hours), H3 resolution 7.
+
+### Business v4
+
+```
+maps.mydatatimeline.com/maps/v4-20260711/{ST}.business_v4.ptiles
+```
+
+Overture Maps places, sequential IDs, cell-relative coordinates, 7.9M records.
+
+### Highways v2
+
+```
+maps.mydatatimeline.com/maps/v4-20260711/{ST}.highways_v2.ptiles
+```
+
+OSM highway ways as drivable segments, H3 resolution 7.
+
+### Business Name Index
+
+```
+maps.mydatatimeline.com/maps/v4-20260711/{ST}.business_name_index.ptiles
+```
+
+Alphabetical prefix index for business name search, 1 block per letter prefix.
+
+### All layers download
+
+```bash
+BASE="https://maps.mydatatimeline.com/maps/v4-20260711"
+for ST in AL AK AZ AR CA CO CT DC DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY; do
+  for LAYER in buildings_v9 business_v4 highways_v2 business_name_index address_v1 water_v1 places_v1 parks_v1 rail_v1; do
+    curl -O "$BASE/$ST.$LAYER.ptiles"
+  done
+  curl -O "$BASE/roads/$ST.roads.ptiles"
+done
+```

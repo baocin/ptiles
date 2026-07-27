@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 .DS_Store
 node_modules/
+
+# Build output from scripts/build_points.py, plus backups of published objects
+# pulled down before an upload. 89 MB and growing, and hermes-git-auto-commit
+# runs hourly -- without this an `add -A` sweeps it all into history, where it
+# is painful to remove.
+tiles/

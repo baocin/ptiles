@@ -287,6 +287,55 @@ def train_dict(blocks):
     return b""
 
 
+COARSE_MAGIC = b"PTCI"
+COARSE_STRIDE = 256
+
+
+def build_coarse_index(entries):
+    """A sampled index, written to the header's `aux` region.
+
+    The full index is 38 bytes per cell -- 4014 KiB for US.signals -- and a
+    reader must fetch all of it before it can find one cell, because entries
+    are only locatable by position. Sampling every 256th entry gives a ~5 KiB
+    map from cell to a bracketing position, so a reader fetches header+aux in
+    one request and then only the slice of the real index it needs. A viewport
+    of 36 cells spans a contiguous 14 KiB run, against 4014 KiB today.
+
+    Written to `aux` rather than a new region because `aux_offset`/`aux_length`
+    already exist in the header (`shared.py::write_header`) and are zero for
+    every layer that has one today. A reader that doesn't know about this sees
+    aux_length 0 or ignores the field, so the file stays readable by everything
+    that reads it now -- no version bump, and the version byte is per file kind
+    anyway.
+
+        0..4    "PTCI"
+        4       format version (1)
+        5..8    padding
+        8..12   stride         u32  entries between samples
+        12..16  sample_count   u32
+        16..20  entry_count    u32  total entries, so a reader can cross-check
+        20..    sample_count x (h3_cell u64, entry_index u32)
+
+    `entries` must already be sorted by h3_cell -- the samples inherit that
+    order and a reader binary-searches them.
+    """
+    samples = [(entries[i]["h3_cell"], i)
+               for i in range(0, len(entries), COARSE_STRIDE)]
+    # Always include the final entry so the last bracket is closed rather than
+    # open-ended; a reader looking for a cell past the last sample would
+    # otherwise have to assume it runs to the end of the index.
+    if entries and samples[-1][1] != len(entries) - 1:
+        samples.append((entries[-1]["h3_cell"], len(entries) - 1))
+
+    out = bytearray()
+    out += COARSE_MAGIC
+    out += struct.pack("<B3x", 1)
+    out += struct.pack("<III", COARSE_STRIDE, len(samples), len(entries))
+    for cell, idx in samples:
+        out += struct.pack("<QI", cell, idx)
+    return bytes(out)
+
+
 def write_layer(name, points, out_stem, bbox):
     """Write one .ptiles file. Returns a stats dict."""
     spec = LAYERS[name]
@@ -344,7 +393,13 @@ def write_layer(name, points, out_stem, bbox):
 
     # Every offset below is derived from `entries` as finally written. The
     # published files broke precisely by computing these from something else.
-    dict_offset = HEADER_SIZE
+    # Coarse index goes immediately after the header, so one range request
+    # fetches both and a reader can locate any cell without the full index.
+    aux_bytes = build_coarse_index(entries)
+    aux_offset = HEADER_SIZE
+    aux_length = len(aux_bytes)
+
+    dict_offset = aux_offset + aux_length
     dict_length = len(dict_bytes)
     index_offset = dict_offset + dict_length
     index_length = 4 + len(entries) * INDEX_ENTRY_SIZE_V2
@@ -357,7 +412,8 @@ def write_layer(name, points, out_stem, bbox):
                      bbox[0], bbox[1], bbox[2], bbox[3],
                      sum(e["feature_count"] for e in entries), len(blocks),
                      dict_offset, dict_length, index_offset, index_length,
-                     blocks_offset)
+                     blocks_offset, aux_offset, aux_length)
+        f.write(aux_bytes)
         f.write(dict_bytes)
         f.write(struct.pack("<I", len(entries)))
         for e in entries:
@@ -471,6 +527,47 @@ def verify_file(path, sample=8):
         cells = [e[0] for e in entries]
         if cells != sorted(cells):
             problems.append("index entries are not sorted by h3_cell")
+
+        # The coarse index is only useful if it actually brackets every cell.
+        # A sampled index that points at the wrong run is worse than none: a
+        # reader would fetch a slice, not find the cell, and report no data.
+        if h["aux_length"]:
+            f.seek(h["aux_offset"])
+            aux = f.read(h["aux_length"])
+            if aux[:4] != COARSE_MAGIC:
+                problems.append(f"aux region is not a coarse index (magic {aux[:4]!r})")
+            else:
+                stride, n_samples, declared_entries = struct.unpack_from("<III", aux, 8)
+                if declared_entries != count:
+                    problems.append(
+                        f"coarse index says {declared_entries} entries, index has {count}")
+                samples = [struct.unpack_from("<QI", aux, 20 + i * 12)
+                           for i in range(n_samples)]
+                if [s[0] for s in samples] != sorted(s[0] for s in samples):
+                    problems.append("coarse samples are not sorted by h3_cell")
+                # Every sample must name the entry it claims to.
+                for cell, idx in samples:
+                    if idx >= count or entries[idx][0] != cell:
+                        problems.append(
+                            f"coarse sample {cell:#x} points at entry {idx}, which is "
+                            f"{entries[idx][0]:#x}" if idx < count else
+                            f"coarse sample {cell:#x} points past the index")
+                        break
+                # And bracketing must find a real cell, checked on a spread of
+                # entries rather than only the sampled ones.
+                for probe in range(0, count, max(1, count // 32)):
+                    want = entries[probe][0]
+                    lo = 0
+                    for cell, idx in samples:
+                        if cell <= want:
+                            lo = idx
+                        else:
+                            break
+                    hi = min(lo + stride, count - 1)
+                    if not any(entries[j][0] == want for j in range(lo, hi + 1)):
+                        problems.append(
+                            f"coarse bracket [{lo},{hi}] does not contain {want:#x}")
+                        break
 
         f.seek(h["dict_offset"])
         dict_bytes = f.read(h["dict_length"]) if h["dict_length"] else b""

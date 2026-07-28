@@ -234,6 +234,65 @@ v4 build (2026-07-11) replaces all prior tile sets. Layers:
 | rail_v1                 | v1     | OSM rail lines             |
 | roads/{ST}.roads.ptiles | v2     | OSM roads                  |
 
+## Brand icons
+
+Favicons for the business/brand layer, hosted alongside the tiles:
+
+```
+https://maps.mydatatimeline.com/brand-favicons/{md5}.png
+```
+
+`{md5}` is the lowercase hex MD5 of the **registered domain** (second level +
+TLD, no scheme, no `www.`, no path), and the extension is always `.png`:
+
+```python
+import hashlib
+name = hashlib.md5("allstarmovers253.com".encode()).hexdigest() + ".png"
+# 7a114db59dd4ebacd26d18c9739c1200.png
+```
+
+Hashing the domain rather than using it directly keeps dots and slashes out of
+object keys. Mapping a brand back to its domain is the consumer's job — the
+tiles reference brands by name, not by icon URL.
+
+### Coverage is partial — handle the miss
+
+The bucket holds **77,977 objects, ~96 MB** (uploaded 2026-07-26). That is a
+small fraction of the brand list, and the two do not line up: sampling 40
+domains from `brand_domains_clean.csv` found 2% present, and 40 rows from
+`brand_favicon_lookup.csv` found 5%. Sherwin-Williams, for one, is absent.
+
+So treat a missing icon as the normal case, not an error, and **check the HTTP
+status**. A miss returns Cloudflare's error page — 404 with ~27 KB of
+`text/html` — so a consumer that trusts the response body or its size will
+happily render an HTML page as an image.
+
+The downloaded-but-not-uploaded remainder lives on NFS; see
+[`scripts/BRAND_FAVICONS.md`](scripts/BRAND_FAVICONS.md) for the pipeline, the
+two sources (Google s2, DDG ip3) and the rsync/rclone upload steps.
+
+### Where the brand names are codified
+
+Not in this repo — these are generated artifacts on NFS under
+`/mnt/core/kino/ptiles/data/`, and are not versioned:
+
+| File | Rows | What |
+| --- | --- | --- |
+| `brand_domains_clean.csv` | 92K | brand → domain, deduped and junk-filtered. The one to use. |
+| `brand_domains.csv` | 109K | raw scrape, keeps quirks |
+| `brand_favicon_lookup.csv` | 25K | brand → `{md5}.png` → domain, i.e. the join already done |
+| `brand_store_urls.parquet` | 950K | store-specific URLs, range-queryable over HTTP |
+| `brand_url_dump.csv` | 1.38M | full dump; its fallback column is wrong |
+
+`BRAND_DOMAINS.md` in that directory documents how they are derived: a scan of
+`parquet/v2/*/business_v2.parquet` across 51 states for `brand` and `website`,
+collapsed per brand, then normalised and checked for near-duplicate brand names
+with trigram-indexed Levenshtein.
+
+Quality caveat: the mapping is scraped from whatever OSM POIs carry, so a brand
+can pick up an unrelated domain. `brand_favicon_lookup.csv` maps Starbucks to
+`allstarmovers253.com`. Do not treat brand → domain as authoritative.
+
 ## Building
 
 Build scripts in `scripts/`:

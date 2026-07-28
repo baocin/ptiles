@@ -113,7 +113,10 @@ v9 adds OSM business tags to the building record without increasing size — sho
 || Rail | 51 per-state | v1 | ~448 KB | 10K | ~45 |
 || Parks | 51 per-state | v1 | ~27 MB | 200K | ~135 |
 || Admin | 1 US-wide | v1 | ~31 MB | grid cells | variable |
+|| Camera | 1 US-wide | v1 | 3.5 MB | 129K | ~27 |
+|| Signals | 1 US-wide | v1 | 21 MB | 2.1M | ~10 |
 || **Total** | | | **~5.2 GB** | | |
+
 
 ## Format evolution milestones
 

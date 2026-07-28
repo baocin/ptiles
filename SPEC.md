@@ -24,6 +24,8 @@ Comprehensive offline GPS context format. Given any coordinate, return everythin
 - [Layer: Business / POIs (B)](#layer-business--pois-b) — existing v4 format, plus Business Name Index (X)
 - [Layer: Address Ranges (D)](#layer-address-ranges-d)
 - [Layer: Routing (U)](#layer-routing-u)
+- [Layer: Cameras (C)](#layer-cameras-c)
+- [Layer: Signals (S)](#layer-signals-s)
 - [Combined Query](#combined-query)
 - [Data Sources](#data-sources)
 - [Reference Decoders](#reference-decoders)
@@ -39,6 +41,8 @@ Each layer is a separate file with its own schema optimized for its data charact
 | `{STATE}.buildings_v8.ptiles`        | `PTILESF\x00` | Buildings               | Small polygons                         | ~1.1 GB (51 files)    |
 | `{STATE}.roads.ptiles`               | `PTILESR\x00` | Roads                   | LineStrings (split at cell boundaries) | ~1.5 GB (51 files)    |
 | `US.admin.ptiles`                    | `PTILESA\x00` | Admin + ZIP + TZ        | H3 lookup grid + large polygons        | ~50-100 MB            |
+| `US.camera.ptiles`                   | `PTILESC\x00` | Cameras / ALPR          | Points (location, direction, angle, operator) | 3.5 MB            |
+| `US.signals.ptiles`                  | `PTILESS\x00` | Traffic signals / stops | Points (signal type, direction)        | 21 MB               |
 | `{STATE}.water.ptiles`               | `PTILESW\x00` | Water bodies            | Mixed polygon + linestring             | ~100 MB (51 files)    |
 | `{STATE}.places.ptiles`              | `PTILESP\x00` | Place names             | Points                                 | ~15 MB (51 files)     |
 | `{STATE}.parks.ptiles`               | `PTILESN\x00` | Parks & protected areas | H3 lookup grid + polygons              | ~27 MB (51 files)     |
@@ -103,8 +107,41 @@ All PTiles files use these common structures.
 | `0x58` | `X`   | Business name index        |
 | `0x44` | `D`   | Address ranges (delivery)  |
 | `0x55` | `U`   | Routing (Urban navigation) |
+| `0x43` | `C`   | Cameras / ALPR             |
+| `0x53` | `S`   | Signals (traffic lights/stops) |
 
-**Auxiliary section** (`aux_offset`/`aux_length`): Used by layers that need an additional data structure beyond the standard header → dictionary → index → blocks layout. Admin and Parks layers use this for their lookup grids. Other layers set these fields to 0.
+**Auxiliary section** (`aux_offset`/`aux_length`): Used by layers that need an additional data structure beyond the standard header → dictionary → index → blocks layout. Admin and Parks use this for their lookup grids; Camera and Signals use it for a [coarse index](#coarse-index-aux). Layers that need neither set both fields to 0.
+
+### Coarse index (aux)
+
+A sampled index that lets a reader locate a cell without fetching the whole
+spatial index. Present when `aux_length > 0` and the region begins with the
+magic `PTCI`; a reader that does not recognise it ignores the region and reads
+the full index as before, so this is additive and needs no version bump.
+
+Written immediately after the 256-byte header, so a single range request
+fetches header and coarse index together.
+
+| Offset | Size | Type   | Field        | Notes                                        |
+|--------|------|--------|--------------|----------------------------------------------|
+| 0      | 4    | char[] | magic        | `PTCI`                                       |
+| 4      | 1    | uint8  | version      | 1                                            |
+| 5      | 3    | —      | padding      |                                              |
+| 8      | 4    | uint32 | stride       | Spatial-index entries between samples (256)  |
+| 12     | 4    | uint32 | sample_count |                                              |
+| 16     | 4    | uint32 | entry_count  | Total spatial-index entries, for cross-check |
+| 20     | 12×n | —      | samples      | `h3_cell` uint64, `entry_index` uint32       |
+
+Samples are sorted by `h3_cell`, inheriting the spatial index's order, and the
+final spatial-index entry is always sampled so the last bracket is closed. To
+find a cell: binary-search the samples for the last one at or below it, then
+read spatial-index entries from that sample's `entry_index` through the next
+sample's. For `US.signals.ptiles` that is ~5 KiB of samples plus one ~10 KiB
+run of the index, against 4014 KiB for the whole index.
+
+Produced by `scripts/build_points.py::build_coarse_index`, which validates it
+on write (`--verify`): samples sorted, each naming the entry it claims, and a
+spread of probes landing inside their own bracket.
 
 ### Spatial Index
 
@@ -755,7 +792,7 @@ $ python3 -c "from shared import read_header; print(read_header(open('TN.busines
  'index_length': 345082, 'blocks_offset': 869626, 'aux_offset': 0, 'aux_length': 0}
 ```
 
-Header, spatial index (H3 res 7, 19-byte entries in v1 index or 37-byte entries with per-cell bbox in v2+ index), and zstd dictionary framing all follow the [common structures](#common-structures) above — `aux_offset`/`aux_length` are unused (0) for this layer.
+Header, spatial index (H3 res 7, 19-byte entries in v1 index or 38-byte entries with per-cell bbox in v2+ index), and zstd dictionary framing all follow the [common structures](#common-structures) above — `aux_offset`/`aux_length` are unused (0) for this layer.
 
 ### Record Format (v4)
 
@@ -1019,6 +1056,38 @@ routing without full-graph Dijkstra.
 - **DapStack:** ptil-16 (feature), ptil-17 (builder), ptil-18 (engine)
 
 ---
+
+## Layer: Cameras (C)
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `osm_id` | i64 (zigzag delta) | OSM node ID |
+| `lon` | i32 | Microdegrees (÷100K) |
+| `lat` | i32 | Microdegrees (÷100K) |
+| `device_type` | u8 | Index: 0=camera, 1=ALPR, 2=guard, 3=unknown |
+| `placement` | u8 | Index: 0=public, 1=outdoor, 2=indoor, 3=unknown |
+| `camera_type` | u8 | Index: 0=fixed, 1=panning, 2=dome, 3=unknown |
+| `flags` | u8 | Bitmask: 0x01=direction, 0x02=operator, 0x04=name, 0x08=ref, 0x10=angle |
+| `[direction]` | u16 | Bearing 0-359°, present if flags & 0x01 |
+| `[operator]` | u8-len string | Present if flags & 0x02 |
+| `[name]` | u16-len string | Present if flags & 0x04 |
+| `[ref_tag]` | u8-len string | Present if flags & 0x08 |
+| `[angle]` | u8 | FOV 0-180°, present if flags & 0x10 |
+
+Multi-state file: `US.camera.ptiles` (3.5 MB, 37K cells, ~129K cameras). All OSM `man_made=surveillance` nodes with camera/ALPR/guard tags.
+
+## Layer: Signals (S)
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `osm_id` | i64 (zigzag delta) | OSM node ID |
+| `lon` | i32 | Microdegrees (÷100K) |
+| `lat` | i32 | Microdegrees (÷100K) |
+| `signal_type` | u8 | Index: 0=traffic_signals, 1=crossing_signals, 2=stop, 3=give_way, 4=railway_signals |
+| `flags` | u8 | Bitmask: 0x01=direction |
+| `[direction]` | u16 | Bearing 0-359°, present if flags & 0x01 |
+
+Multi-state file: `US.signals.ptiles` (21 MB, 108K cells, ~2.1M signals). All OSM `highway=traffic_signals` / `highway=stop` / `highway=give_way` nodes.
 
 ## Combined Query
 

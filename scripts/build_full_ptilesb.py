@@ -16,6 +16,7 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(__file__))
 from encoding import coord_to_micro
 from shared import write_header, HEADER_SIZE, write_index, train_dictionary
+from states import get_state
 
 sys.stdout.reconfigure(line_buffering=True)
 import pyarrow.parquet as pq
@@ -143,8 +144,30 @@ def load_state(st, brand_map, chain_idx):
         for c in ["address", "city", "phone", "website", "confidence"]
     ]
 
+    # ponytail: the per-state extracts are cut with `WHERE state = '{ST}'` on the
+    # vendor address column (Overture addresses[1].region, Foursquare region) and
+    # that column is never cross-checked against lat/lon. ~0.2% of rows carry a
+    # correct state string but garbage upstream coordinates — a Memphis hotel at
+    # (59.59,-68.09) in Quebec, a Nashville shop in Siberia, London's Tobacco Dock
+    # tagged city=Tiptonville — so they get H3-indexed into cells nowhere near the
+    # state and pollute that state's file. Coordinates are what a .ptiles file is
+    # indexed by, so a row we can't place is worse than a row we drop. Same padded
+    # bbox guard build_parks/build_places/extract_all_states already apply.
+    bbox = get_state(st)
+    skipped_bbox = 0
+
     records = []
     for i in range(len(t)):
+        lat, lon = lats[i], lons[i]
+        if lat is None or lon is None:
+            skipped_bbox += 1
+            continue
+        if bbox and not (
+            bbox.min_lon <= lon <= bbox.max_lon and bbox.min_lat <= lat <= bbox.max_lat
+        ):
+            skipped_bbox += 1
+            continue
+
         s = src[i]
         stype = SRC_FOURSQUARE if s == "foursquare" else SRC_OVERTURE
         sname = "foursquare" if s == "foursquare" else "overture"
@@ -174,6 +197,11 @@ def load_state(st, brand_map, chain_idx):
                 "brand": brand,
                 "chain_count": chain_count,
             }
+        )
+    if skipped_bbox:
+        print(
+            f"  Dropped {skipped_bbox:,} rows outside the {st} bbox (bad upstream coords)",
+            flush=True,
         )
     return records
 

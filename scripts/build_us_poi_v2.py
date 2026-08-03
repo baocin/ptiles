@@ -45,6 +45,7 @@ from shared import (
     train_dictionary,
 )
 from encoding import coord_to_micro
+from states import get_state
 
 try:
     from rapidfuzz import fuzz
@@ -219,8 +220,30 @@ def load_state_file(state: str, brand_map: dict, chain_idx: dict) -> list[dict]:
     websites = t.column("website").to_pylist()
     confs = t.column("confidence").to_pylist()
 
+    # ponytail: the per-state extracts are cut with `WHERE state = '{ST}'` on the
+    # vendor address column (Overture addresses[1].region, Foursquare region) and
+    # that column is never cross-checked against lat/lon. ~0.2% of rows carry a
+    # correct state string but garbage upstream coordinates — a Memphis hotel at
+    # (59.59,-68.09) in Quebec, a Nashville shop in Siberia, London's Tobacco Dock
+    # tagged city=Tiptonville — so they get H3-indexed into cells nowhere near the
+    # state and pollute that state's file. Coordinates are what a .ptiles file is
+    # indexed by, so a row we can't place is worse than a row we drop. Same padded
+    # bbox guard build_parks/build_places/extract_all_states already apply.
+    bbox = get_state(state)
+    skipped_bbox = 0
+
     records = []
     for i in range(len(t)):
+        lat, lon = lats[i], lons[i]
+        if lat is None or lon is None:
+            skipped_bbox += 1
+            continue
+        if bbox and not (
+            bbox.min_lon <= lon <= bbox.max_lon and bbox.min_lat <= lat <= bbox.max_lat
+        ):
+            skipped_bbox += 1
+            continue
+
         s = src[i]
         if s == "foursquare":
             source_type = SRC_FOURSQUARE
@@ -269,6 +292,11 @@ def load_state_file(state: str, brand_map: dict, chain_idx: dict) -> list[dict]:
         rec["_source_type"] = source_type
         records.append(rec)
 
+    if skipped_bbox:
+        print(
+            f"  Dropped {skipped_bbox:,} rows outside the {state} bbox (bad upstream coords)",
+            flush=True,
+        )
     print(f"  Loaded {len(records):,} records from {state}.parquet", flush=True)
     return records
 

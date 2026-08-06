@@ -18,6 +18,7 @@ import h3
 import zstandard as zstd
 
 from shared import (
+    choose_dictionary,
     encode_varint,
     zigzag_encode,
     encode_merged_block,
@@ -226,12 +227,22 @@ def build(abbr):
             )
             off += 1
 
-    dd = b""
-    cbs = [zstd.ZstdCompressor(level=1).compress(b) for b in mb]
+    # level 12 over level 1 is ~10% here for no decoder cost. Whether a
+    # dictionary earns its place is measured, not assumed.
+    dd = choose_dictionary(mb, level=12)
+    if dd:
+        zd = zstd.ZstdCompressionDict(dd)
+        cbs = [zstd.ZstdCompressor(level=12, dict_data=zd).compress(b) for b in mb]
+    else:
+        cbs = [zstd.ZstdCompressor(level=12).compress(b) for b in mb]
     tf = sum(e["feature_count"] for e in pi)
     do = HEADER_SIZE
-    dl = 0
-    io = do
+    # These were hardcoded to 0 back when this builder never produced a
+    # dictionary. Leaving them so once choose_dictionary could return one wrote
+    # blocks compressed against a dictionary the file did not contain, and
+    # every read failed with "Dictionary mismatch".
+    dl = len(dd)
+    io = do + dl
     il = 4 + len(pi) * INDEX_ENTRY_SIZE_V2
     bo = io + il
     ie = []
@@ -263,6 +274,11 @@ def build(abbr):
             il,
             bo,
         )
+        # The dictionary sits between header and index, at `do`, which is what
+        # dict_offset/dict_length in the header point at. Omitting it while
+        # reporting a non-zero dict_length is unrecoverable for a reader.
+        if dd:
+            f.write(dd)
         f.write(struct.pack("<I", len(ie)))
         for e in ie:
             f.write(

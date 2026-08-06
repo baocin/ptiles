@@ -16,6 +16,7 @@ import h3
 import zstandard as zstd
 
 from shared import (
+    choose_dictionary,
     encode_varint,
     zigzag_encode,
     encode_coordinates,
@@ -232,11 +233,8 @@ def build(abbr):
 
     # Train dict
     samples = [b for _, b in block_offsets[:2000]]
-    dict_data = (
-        zstd.train_dictionary(512 * 1024, samples).as_bytes()
-        if len(samples) >= 2
-        else b""
-    )
+    # A fixed 512 KB dictionary was 84% of RI.highways_v2 and 59% of AK.
+    dict_data = choose_dictionary([b for _, b in block_offsets], level=12)
 
     # Compress
     zd = zstd.ZstdCompressionDict(dict_data) if dict_data else None
@@ -245,7 +243,11 @@ def build(abbr):
         if zd:
             cb = zstd.ZstdCompressor(level=12, dict_data=zd).compress(raw)
         else:
-            cb = zstd.ZstdCompressor(level=1).compress(raw)
+            # Level 12 either way. The no-dictionary branch used level 1, which
+            # was harmless while a dictionary was always trained, but is now
+            # the common path — dropping the level would cost more than the
+            # dictionary was saving.
+            cb = zstd.ZstdCompressor(level=12).compress(raw)
         compressed_blocks.append(cb)
 
     out = OUTPUT_DIR / f"{abbr}.highways.ptiles"

@@ -19,6 +19,7 @@ import h3
 import zstandard as zstd
 
 from shared import (
+    choose_dictionary,
     encode_varint,
     zigzag_encode,
     encode_index_entry_v2,
@@ -232,9 +233,14 @@ def build_state(abbr):
                 }
             )
             off += 1
-    dd = zstd.train_dictionary(512 * 1024, mb[:2000]).as_bytes()
-    zd = zstd.ZstdCompressionDict(dd)
-    cbs = [zstd.ZstdCompressor(level=12, dict_data=zd).compress(b) for b in mb]
+    # Sized by measurement, not assumed: places files have few blocks, so a
+    # fixed 512 KB dictionary was half the layer.
+    dd = choose_dictionary(mb, level=12)
+    if dd:
+        zd = zstd.ZstdCompressionDict(dd)
+        cbs = [zstd.ZstdCompressor(level=12, dict_data=zd).compress(b) for b in mb]
+    else:
+        cbs = [zstd.ZstdCompressor(level=12).compress(b) for b in mb]
     # Debug: check first compressed block magic
     if cbs:
         print(

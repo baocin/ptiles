@@ -36,6 +36,7 @@ import zstandard as zstd
 
 sys.path.insert(0, os.path.dirname(__file__))
 from shared import (
+    choose_dictionary,
     write_header, HEADER_SIZE,
     encode_varint, zigzag_encode, coord_to_micro,
     encode_string_u16, encode_string_u8,
@@ -420,7 +421,7 @@ def build_water_ptiles(features: list[dict], output_path: str):
     print("Training zstd dictionary...")
     sample_blocks = [b[1] for b in raw_blocks[:min(500, len(raw_blocks))]]
     if sample_blocks:
-        dict_data = zstd.train_dictionary(256 * 1024, sample_blocks).as_bytes()
+        dict_data = choose_dictionary([b[1] for b in raw_blocks], level=12)
     else:
         dict_data = b""
 

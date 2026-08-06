@@ -8,7 +8,10 @@ and domain-specific constants.
 
 import struct
 import io
+import logging
 import zstandard as zstd
+
+logger = logging.getLogger("ptiles.shared")
 
 try:
     from encoding import *  # noqa: F401, F403
@@ -182,6 +185,74 @@ def binary_search_index(index: list[dict], h3_cell: int) -> dict | None:
 
 def train_dictionary(samples: list[bytes], dict_size: int = 512 * 1024) -> bytes:
     return zstd.train_dictionary(dict_size, samples).as_bytes()
+
+
+# Dictionary sizes to consider, smallest first. 0 means "no dictionary", and it
+# is a real contender: the dictionary is stored in the file, so it is a fixed
+# cost paid once and repaid only across many blocks.
+_DICT_CANDIDATES = (0, 8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024,
+                    128 * 1024, 256 * 1024, 512 * 1024)
+
+
+def choose_dictionary(
+    blocks: list[bytes],
+    *,
+    level: int = 12,
+    sample: int = 300,
+    candidates: tuple[int, ...] = _DICT_CANDIDATES,
+) -> bytes:
+    """Pick the dictionary that makes the *file* smallest, or none at all.
+
+    Every builder used to hardcode 512 KB (or 256 KB) whatever the corpus, on
+    the assumption a dictionary always helps. It does not. It only pays when
+    the per-block saving, summed over every block, exceeds the dictionary's own
+    bytes — and low-block-count files never get there. Measured on the shipped
+    set: the dictionary is 84% of RI.highways_v2, 50% of the whole places
+    layer, and 29% of highways, against 0.5% of water, which has 117k blocks to
+    spread it over.
+
+    So this measures instead of assuming. Each candidate size is trained and
+    scored on a sample of blocks, scaled to the full corpus, and charged for
+    its own size; the winner is whichever total is smallest. Returning b""
+    when no dictionary wins is a normal outcome, not a failure.
+
+    Scoring on a sample keeps this affordable — training and compressing the
+    full corpus once per candidate would dominate build time on large states.
+    """
+    if not blocks:
+        return b""
+
+    corpus = sum(len(b) for b in blocks)
+    scored = blocks[:sample] if len(blocks) > sample else blocks
+    scale = corpus / max(1, sum(len(b) for b in scored))
+
+    best_bytes = b""
+    best_total = None
+
+    for size in candidates:
+        # A dictionary larger than a slice of the corpus cannot repay itself,
+        # and zstd needs a corpus comfortably bigger than the dictionary to
+        # train a useful one at all.
+        if size and size > corpus // 8:
+            continue
+        try:
+            if size:
+                trained = zstd.train_dictionary(size, blocks[:2000]).as_bytes()
+                cdict = zstd.ZstdCompressionDict(trained)
+                cctx = zstd.ZstdCompressor(level=level, dict_data=cdict)
+            else:
+                trained = b""
+                cctx = zstd.ZstdCompressor(level=level)
+        except Exception as e:  # training can fail on tiny or uniform corpora
+            logger.debug("dictionary size %d rejected: %s", size, e)
+            continue
+
+        compressed = sum(len(cctx.compress(b)) for b in scored) * scale
+        total = compressed + len(trained)
+        if best_total is None or total < best_total:
+            best_total, best_bytes = total, trained
+
+    return best_bytes
 
 
 def compress_block(data: bytes, dict_data: bytes, level: int = 12) -> bytes:

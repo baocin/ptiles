@@ -28,15 +28,23 @@ from shared import (
 )
 from states import STATES, get_state
 
-OUTPUT_DIR = Path("/home/aoi/kino/projects/ptiles/data/states")
-PBF_DIR = Path("/mnt/aoi/kino/ptiles/pbfs")
+OUTPUT_DIR = Path("/mnt/core/kino/ptiles/data/v4/states")
+PBF_DIR = Path("/mnt/core/timeline-ptiles-cache/raw")
 # PTILESD per SPEC.md. This was b"PTILESA2\x00" — nine bytes, of which
 # write_header keeps only the first seven, so the "2" was dropped and every
 # address file shipped carrying PTILESA, the *admin* magic. Files built before
 # this fix are indistinguishable from admin files by their magic byte and need
 # rebuilding to be identified correctly.
 MAGIC = b"PTILESD\x00"
-VERSION = 1
+
+# v2 adds i16 cell-relative coordinates to each record.
+#
+# v1 stored only (osm_id, housenumber, street). The extractor had the position
+# — it needs one to pick the H3 cell — and then discarded it, so an address
+# could only ever be located to its cell. Measured on the v1 TN file, that is a
+# median 531 m of uncertainty and 2.6 km at p90, which cannot support either
+# direction of geocoding. Four bytes per record fixes it.
+VERSION = 2
 H3_RES = 7
 
 PBF_MAP = {
@@ -136,9 +144,20 @@ class AddrExtractor(osmium.SimpleHandler):
         )
 
 
-def enc(a, pid):
+def enc(a, pid, cell_center_micro):
+    """Encode one v2 address record.
+
+    Coordinates are i16 offsets in microdegrees from the centre of the H3 cell
+    the address hashes to, the same scheme buildings and business v4 use. A
+    res-7 cell spans roughly 0.02 degrees against the i16 ceiling of 0.32768,
+    so the offset cannot overflow for a point inside its own cell — which is
+    the only way records are ever grouped here.
+    """
     b = bytearray()
     b.extend(encode_varint(zigzag_encode(a["osm_id"] - pid)))
+    off_lon = round(a["lon"] * 100000) - cell_center_micro[0]
+    off_lat = round(a["lat"] * 100000) - cell_center_micro[1]
+    b.extend(struct.pack("<hh", off_lon, off_lat))
     hn = a["housenumber"].encode("utf-8")
     b.extend(struct.pack("<H", len(hn)))
     b.extend(hn)
@@ -152,7 +171,7 @@ def build(abbr):
     pbfn = PBF_MAP.get(abbr)
     if not pbfn:
         return {"abbr": abbr, "error": "no mapping"}
-    pbfp = PBF_DIR / f"{pbfn}-latest.osm.pbf"
+    pbfp = PBF_DIR / f"{pbfn}.osm.pbf"
     if not pbfp.exists():
         return {"abbr": abbr, "error": "no pbf"}
     s = get_state(abbr)
@@ -176,9 +195,14 @@ def build(abbr):
         cr = []
         pd = []
         for cell in bch:
+            # Offsets are measured from each cell's own centre, not the block's
+            # — a block spans 8 cells, and per-cell keeps the deltas small and
+            # the decode independent of how cells were batched.
+            ccl, ccn = h3.cell_to_latlng(hex(cell)[2:])
+            cell_center_micro = (round(ccn * 100000), round(ccl * 100000))
             rs, pid = [], 0
             for a in pc[cell]:
-                rs.append(enc(a, pid))
+                rs.append(enc(a, pid, cell_center_micro))
                 pid = a["osm_id"]
             cr.append((cell, rs))
             pd.append((cell, len(rs)))
@@ -221,7 +245,7 @@ def build(abbr):
             }
         )
 
-    op = OUTPUT_DIR / f"{abbr}.address.ptiles"
+    op = OUTPUT_DIR / f"{abbr}.address_v2.ptiles"
     with open(op, "wb") as f:
         write_header(
             f,

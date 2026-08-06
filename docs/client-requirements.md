@@ -323,8 +323,14 @@ u32 count
 
 #### Business (PTILESB v1)
 
-Source: `scripts/build_business.py:299` `encode_record`,
-`scripts/build_us_business.py:163` `encode_record`.
+Historical. The shipped business layer is **v4**, whose record layout differs
+substantially — no `record_len` prefix, a sequential id rather than a hash, and
+i16 cell-relative coordinates. For v4 see `encode_v4` in
+`scripts/build_full_ptilesb.py`, and the v4 section of `SPEC.md`.
+
+The v1 builders this section was derived from (`build_business.py:299` and
+`build_us_business.py:163`, both `encode_record`) have been deleted; they are
+in git history if the v1 layout ever needs checking.
 
 ```
 block: { u32 record_len + record_body }*

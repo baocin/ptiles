@@ -1,5 +1,15 @@
 # PTILES Building → Business Enrichment
 
+> **Status: unbuilt design doc.** The `build_building_business.py` it describes
+> was never written — no such file exists, in this tree or anywhere in git
+> history — and no `.building_business.ptiles` layer has ever been produced.
+> It also refers to `build_us_business.py`, a v1-era builder since deleted;
+> the current business builder is `build_full_ptilesb.py` (v4). See
+> `scripts/README.md` for the layer-to-builder map.
+>
+> Kept for the design rationale below, not as a description of anything that
+> exists.
+
 ## Design Decision: Hybrid (Option 2 variant + Option 3)
 
 **Chosen approach:** H3-cell-partitioned sidecar `.building_business.ptiles` 

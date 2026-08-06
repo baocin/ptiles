@@ -63,7 +63,8 @@ wget -i <(curl -sL https://download.geofabrik.de/north-america/us/ | \
 - `build_state_v8.py` — buildings
 - `build_roads.py` — roads
 - `build_water.py` — water features
-- `build_tn_v8.py` — TN-only buildings test
+- `build_us_highways.py` — highways
+- `build_points.py` — cameras and signals
 
 ### 2. Overture Maps (Buildings + Places)
 
@@ -85,7 +86,7 @@ alternative for building extraction.
 **Format:** 16 Zstandard-compressed Parquet files, 9.7 GB total
 **Schema:** id, geometry (WKB), name, categories, addresses, phone, website,
 brand, social, email
-**Used by:** `build_business.py` / `build_us_business.py`
+**Used by:** `build_full_ptilesb.py`
 **Update frequency:** Quarterly. Re-download URL pattern:
 `https://data.source.coop/overture-maps/release/{YYYY-MM-DD}/theme=places/type=place/`
 **License:** Community Dataset Agreement (CDA)
@@ -216,14 +217,18 @@ uv run --with osmium --with h3 --with zstandard --with shapely \
 ### Business / POIs
 
 ```bash
-# TN only (old, hardcoded)
+# All 51 states -> {ST}.business_v4.ptiles (resumes; skips states already built)
 uv run --with pyarrow --with shapely --with h3 --with zstandard --with numpy \
-    python scripts/build_business.py
+    python scripts/build_full_ptilesb.py
 
-# US-wide (single pass, ~30-60 min)
-uv run --with pyarrow --with shapely --with h3 --with zstandard --with numpy \
-    python scripts/build_us_business.py
+# Name-prefix search index, built from the business_v4 file above
+uv run --with h3 --with zstandard \
+    python scripts/build_business_name_index.py TN
 ```
+
+`build_full_ptilesb.py` is the only builder that emits the shipped v4 format.
+The older `build_business.py` (v1) and `build_us_poi*.py` (v3) were deleted;
+see `scripts/README.md` for the full layer-to-builder map.
 
 ### Admin (full US only, needs Census shapefiles)
 

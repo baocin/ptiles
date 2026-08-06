@@ -31,9 +31,9 @@ export class BuildingsReader {
   readonly dictData: Uint8Array | null;
   private data: Uint8Array;
 
-  constructor(data: Uint8Array) {
+  constructor(data: Uint8Array, source?: string) {
     this.data = data;
-    this.header = parseHeader(data);
+    this.header = parseHeader(data, source);
     this.dictData = this.header.dict_length > 0
       ? data.slice(this.header.dict_offset, this.header.dict_offset + this.header.dict_length)
       : null;
@@ -46,7 +46,7 @@ export class BuildingsReader {
   /** Open a BuildingsReader from a file path. */
   static open(path: string): BuildingsReader {
     const data = readFileSync(path);
-    return new BuildingsReader(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    return new BuildingsReader(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), path);
   }
 
   /** Query building at (lat, lon) — finds the cell, decodes all records, returns the first containing match. */

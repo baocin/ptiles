@@ -15,9 +15,9 @@ export class BusinessReader {
   readonly categories: string[];
   private data: Uint8Array;
 
-  constructor(data: Uint8Array, categories: string[] = []) {
+  constructor(data: Uint8Array, categories: string[] = [], source?: string) {
     this.data = data;
-    this.header = parseHeader(data);
+    this.header = parseHeader(data, source);
     this.categories = categories;
 
     this.dictData = this.header.dict_length > 0
@@ -46,7 +46,7 @@ export class BusinessReader {
       }
     }
 
-    return new BusinessReader(buf, cats);
+    return new BusinessReader(buf, cats, path);
   }
 
   /**

@@ -11,9 +11,9 @@ export class WaterReader {
   readonly relativeOffsets: boolean;
   private data: Uint8Array;
 
-  constructor(data: Uint8Array) {
+  constructor(data: Uint8Array, source?: string) {
     this.data = data;
-    this.header = parseHeader(data);
+    this.header = parseHeader(data, source);
 
     const indexBuf = data.slice(this.header.index_offset, this.header.index_offset + this.header.index_length);
     this.index = parseIndex(indexBuf);
@@ -22,7 +22,7 @@ export class WaterReader {
 
   static open(path: string): WaterReader {
     const data = readFileSync(path);
-    return new WaterReader(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    return new WaterReader(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), path);
   }
 
   /** Get large water body features from the aux section. */

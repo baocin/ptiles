@@ -130,6 +130,18 @@ export interface ParkFeature {
 
 export interface Header {
   format: string;
+  /** The raw seven-byte magic as read from the file. */
+  magic: string;
+  /**
+   * True when this is an Address file identified only by its filename, because
+   * it was built before the PTILESD fix and carries the Admin magic PTILESA.
+   */
+  legacy_magic: boolean;
+  /**
+   * True when the magic is PTILESA and no filename was supplied to tell Admin
+   * from a pre-fix Address file. `format` reports Admin, which may be wrong.
+   */
+  format_ambiguous: boolean;
   version: number;
   min_lat: number;
   min_lon: number;

@@ -40,6 +40,7 @@ Block format:
   records       variable (uncompressed building data)
 """
 
+import re
 import struct
 import h3
 from shared import (
@@ -74,29 +75,41 @@ HEIGHT_TIERS = {0: "unknown", 1: "1-2", 2: "3-5", 3: "6+"}
 METERS_PER_LEVEL = 3.2
 
 
+# Unit suffixes on the OSM `height` tag, mapped to metres. Matched after the
+# number is split off, so plurals and spacing are handled by the regex rather
+# than by enumerating every spelling — an earlier version listed "meter" and
+# so silently dropped every "12 meters".
+_HEIGHT_UNITS = {
+    "": 1.0, "m": 1.0, "meter": 1.0, "meters": 1.0,
+    "metre": 1.0, "metres": 1.0,
+    "ft": 0.3048, "feet": 0.3048, "foot": 0.3048, "'": 0.3048,
+}
+
+_HEIGHT_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([a-z']*)\s*$")
+
+
 def parse_height(value) -> float | None:
     """Parse an OSM `height` tag to metres.
 
     The tag is nominally bare metres, but a minority carry a unit and a few
-    use feet. Anything unparseable is dropped rather than guessed.
+    use feet. Anything unparseable is dropped rather than guessed — an
+    unparseable height must read as unknown, never as zero, because a caller
+    casting shadows cannot tell those apart otherwise.
     """
     if value is None:
         return None
     if isinstance(value, (int, float)):
         height = float(value)
     else:
-        text = str(value).strip().lower()
-        if not text:
+        match = _HEIGHT_RE.match(str(value).strip().lower())
+        if not match:
             return None
-        scale = 1.0
-        for suffix, factor in (("meter", 1.0), ("metre", 1.0), ("feet", 0.3048),
-                               ("ft", 0.3048), ("m", 1.0), ("'", 0.3048)):
-            if text.endswith(suffix):
-                text = text[: -len(suffix)].strip()
-                scale = factor
-                break
+        number, unit = match.groups()
+        scale = _HEIGHT_UNITS.get(unit)
+        if scale is None:
+            return None
         try:
-            height = float(text) * scale
+            height = float(number) * scale
         except ValueError:
             return None
     # Guard against typos: the encoder clamps at 127.5 m anyway, and a

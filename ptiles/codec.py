@@ -55,7 +55,8 @@ __all__ = [
     "ROAD_CLASS_REVERSE",
     "SURFACE_REVERSE",
     "WATER_TYPES",
-    "decode_water_record",
+    # decode_water_record lives in ptiles.water, not here — listing it
+    # made `from ptiles.codec import *` raise AttributeError.
     # v2 additions
     "INDEX_ENTRY_SIZE_V2",
     "decode_coords_u16",
@@ -78,11 +79,33 @@ def encode_varint(value: int) -> bytes:
     return bytes(buf)
 
 
+#: A 64-bit value needs at most ten 7-bit groups. Past that the input is not a
+#: varint, and continuing would spin to the end of the buffer building a
+#: nonsense integer.
+MAX_VARINT_BYTES = 10
+
+
 def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
-    """Decode unsigned varint. Returns (value, bytes_consumed)."""
+    """Decode unsigned varint. Returns (value, bytes_consumed).
+
+    Raises ValueError on a truncated or over-long encoding rather than reading
+    off the end — the records these appear in are walked sequentially, so a
+    silently wrong length desynchronises everything after it.
+    """
     result = shift = 0
     start = pos
+    end = len(data)
     while True:
+        if pos >= end:
+            raise ValueError(
+                f"truncated varint at byte {start}: ran off the end of "
+                f"{end} bytes with the continuation bit still set"
+            )
+        if pos - start >= MAX_VARINT_BYTES:
+            raise ValueError(
+                f"over-long varint at byte {start}: more than "
+                f"{MAX_VARINT_BYTES} bytes without a terminator"
+            )
         b = data[pos]
         result |= (b & 0x7F) << shift
         pos += 1
@@ -182,18 +205,40 @@ def encode_string_u8(s: str) -> bytes:
     return struct.pack("B", len(encoded)) + encoded
 
 
+def _decode_string(data: bytes, pos: int, slen: int, hdr: int) -> tuple[str, int]:
+    """Shared body for the length-prefixed string decoders.
+
+    A declared length running past the buffer used to slice silently: Python
+    clamps, so a corrupt prefix returned a short string *and* a consumed count
+    far beyond the data. Records are walked sequentially by that count, so one
+    bad byte quietly turned the rest of the block into garbage that still
+    decoded into plausible-looking objects. Failing here is the whole point.
+
+    Invalid UTF-8 is replaced rather than raised: OSM carries occasional
+    mis-encoded names, and losing a character beats losing the block.
+    """
+    start = pos + hdr
+    end = start + slen
+    if end > len(data):
+        raise ValueError(
+            f"string at byte {pos} declares {slen} bytes but only "
+            f"{max(0, len(data) - start)} remain"
+        )
+    return data[start:end].decode("utf-8", "replace"), hdr + slen
+
+
 def decode_string_u16(data: bytes, pos: int) -> tuple[str, int]:
     """Decode uint16-prefixed string. Returns (string, total_bytes_consumed)."""
-    slen = struct.unpack_from("<H", data, pos)[0]
-    s = data[pos + 2 : pos + 2 + slen].decode("utf-8")
-    return s, 2 + slen
+    if pos + 2 > len(data):
+        raise ValueError(f"truncated u16 string length at byte {pos}")
+    return _decode_string(data, pos, struct.unpack_from("<H", data, pos)[0], 2)
 
 
 def decode_string_u8(data: bytes, pos: int) -> tuple[str, int]:
     """Decode uint8-prefixed string. Returns (string, total_bytes_consumed)."""
-    slen = data[pos]
-    s = data[pos + 1 : pos + 1 + slen].decode("utf-8")
-    return s, 1 + slen
+    if pos >= len(data):
+        raise ValueError(f"truncated u8 string length at byte {pos}")
+    return _decode_string(data, pos, data[pos], 1)
 
 
 # --- PTiles Header (256 bytes) ---

@@ -2,10 +2,11 @@
 
 import { describe, test, expect } from 'vitest';
 import { PtilesClient } from '../src/composite.js';
+import { DATA_DIR, describeIfPresent } from './helpers.js';
 
-const DATA_DIR = process.env.PTILES_DATA_DIR || '/home/aoi/kino/projects/ptiles/data/states';
+// Fixture location is resolved once, in helpers.ts.
 
-describe('Composite client', () => {
+describeIfPresent('Composite client', 'TN.buildings_v8.ptiles', () => {
   test('PtilesClient.openState loads available layers for TN', () => {
     const client = PtilesClient.openState('TN', DATA_DIR);
 

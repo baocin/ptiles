@@ -21,6 +21,10 @@ from typing import Any
 import h3
 import zstandard as zstd
 
+from ptiles.geometry import (  # noqa: F401  (re-exported for callers)
+    point_to_linestring_distance_meters,
+    point_to_segment_distance_meters,
+)
 from ptiles.codec import (
     ROAD_CLASS_REVERSE,
     SURFACE_REVERSE,
@@ -215,81 +219,9 @@ def decode_block(data: bytes, version: int) -> tuple[list[RoadSegment], list[Int
 
 
 # --- Distance functions ---
-
-def point_to_segment_distance_meters(
-    px: float, py: float,  # query (lon, lat)
-    ax: float, ay: float,  # segment start (lon, lat)
-    bx: float, by: float,  # segment end (lon, lat)
-    m_per_deg_lon: float | None = None,
-) -> tuple[float, float, float, float]:
-    """Compute planar point-to-segment distance with latitude scaling.
-
-    If m_per_deg_lon is provided (precomputed from query point), it's used
-    instead of computing per-segment. Saves ~3 trig calls per call.
-    """
-    if m_per_deg_lon is not None:
-        mlon = m_per_deg_lon
-        mlat = 111320.0
-    else:
-        mean_lat = (py + ay + by) / 3.0
-        mlat = 111320.0
-        mlon = 111320.0 * max(math.cos(math.radians(mean_lat)), 0.001)
-
-    pxm = px * mlon
-    pym = py * mlat
-    axm = ax * mlon
-    aym = ay * mlat
-    bxm = bx * mlon
-    bym = by * mlat
-
-    dx = bxm - axm
-    dy = bym - aym
-    len_sq = dx * dx + dy * dy
-
-    if len_sq < 1e-12:
-        t = 0.0
-    else:
-        dot = (pxm - axm) * dx + (pym - aym) * dy
-        t = max(0.0, min(1.0, dot / len_sq))
-
-    sxm = axm + t * dx
-    sym = aym + t * dy
-    distance = math.hypot(pxm - sxm, pym - sym)
-
-    snapped_lon = ax + t * (bx - ax)
-    snapped_lat = ay + t * (by - ay)
-
-    return distance, snapped_lon, snapped_lat, t
-
-
-def point_to_linestring_distance_meters(
-    px: float, py: float,
-    coords: tuple[tuple[float, float], ...],
-) -> tuple[float, float, float, int, float]:
-    """Minimum distance from point to linestring in meters.
-
-    Returns (min_dist, snapped_lon, snapped_lat, segment_index, along_fraction).
-    """
-    min_dist = float("inf")
-    best_lon = py
-    best_lat = px
-    best_seg = 0
-    best_t = 0.0
-
-    for i in range(len(coords) - 1):
-        dist, slon, slat, t = point_to_segment_distance_meters(
-            px, py,
-            coords[i][0], coords[i][1],
-            coords[i + 1][0], coords[i + 1][1],
-        )
-        if dist < min_dist:
-            min_dist = dist
-            best_lon = slon
-            best_lat = slat
-            best_seg = i
-            best_t = t
-
-    return min_dist, best_lon, best_lat, best_seg, best_t
+#
+# Live in ptiles.geometry now; re-exported here because callers (and the
+# router) import them from this module.
 
 
 def profile_matches(profile: str | None, road_class: str) -> bool:

@@ -11,8 +11,8 @@ from __future__ import annotations
 import io
 import json
 import logging
-import math
 import os
+import re
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
@@ -20,18 +20,19 @@ from enum import IntEnum
 import h3
 import zstandard as zstd
 
+from ptiles.geometry import haversine_meters
 from ptiles.codec import (
     decode_varint,
     zigzag_decode,
     decode_string_u16,
     decode_string_u8,
     read_header,
-    read_index,
+    read_index_auto,
     binary_search_index,
     decompress_block,
     decode_coords_u16,
-    decode_index_v2,
     decode_merged_block_header,
+    INDEX_ENTRY_SIZE_V2,
 )
 
 logger = logging.getLogger("ptiles.business")
@@ -57,6 +58,14 @@ class Business:
     operating_status: str | None = None
     emails: tuple[str, ...] = ()
     socials: tuple[str, ...] = ()
+    # v4 additions, matching what build_full_ptilesb.py actually writes.
+    # SPEC.md's v4 section also lists star_rating, opening_hours and an
+    # amenities block; the shipped encoder writes none of them, so they are
+    # not modelled here.
+    chain_count: int | None = None
+    source_type: str | None = None
+    source_id: str | None = None
+    confidence: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,11 +158,134 @@ def decode_business_record(data: bytes, offset: int) -> tuple[dict, int]:
     }, pos - offset
 
 
-def decode_block(data: bytes) -> list[dict]:
-    """Decode all business records from a decompressed block.
+SOURCE_TYPES = {1: "overture", 2: "foursquare"}
 
-    Format: { u32 record_len + record_body }*
+
+def decode_business_record_v4(data: bytes, offset: int,
+                              cell_center_micro: tuple[int, int]
+                              ) -> tuple[dict, int]:
+    """Decode one v4 business record. Returns (fields, bytes_consumed).
+
+    Mirrors ``encode_v4`` in scripts/build_full_ptilesb.py, which is the only
+    thing that has ever written these files. Three departures from SPEC.md's
+    v4 section, which describes a format that was never built:
+
+    * no u32 record_len prefix — records run back to back and the block is
+      walked ``feature_count`` times, so a bad record desyncs the rest of the
+      block rather than costing just itself;
+    * the id is a sequential per-file counter, zigzag varint, not a delta and
+      not a content hash;
+    * coordinates are i16 offsets from the H3 cell centre, not absolute i32.
+
+    The encoder falls back to i32 offsets when either exceeds i16 range and
+    records no flag saying so, which is undecodable in principle. In practice
+    it cannot happen: the offset is measured against the centre of the cell the
+    point itself hashes to, and a res-7 cell spans ~0.02 deg against the i16
+    ceiling of 0.32768 deg. This decoder therefore always reads i16.
     """
+    pos = offset
+
+    raw, consumed = decode_varint(data, pos)
+    pos += consumed
+    uid = zigzag_decode(raw)
+
+    offset_lon, offset_lat = struct.unpack_from("<hh", data, pos)
+    pos += 4
+    lon_micro = cell_center_micro[0] + offset_lon
+    lat_micro = cell_center_micro[1] + offset_lat
+
+    name, consumed = decode_string_u16(data, pos)
+    pos += consumed
+
+    category_idx = data[pos]
+    pos += 1
+    flags = data[pos]
+    pos += 1
+
+    phone = website = address = brand = None
+    chain_count = None
+
+    if flags & 0x01:
+        phone, consumed = decode_string_u8(data, pos)
+        pos += consumed
+    if flags & 0x02:
+        website, consumed = decode_string_u8(data, pos)
+        pos += consumed
+    if flags & 0x04:
+        address, consumed = decode_string_u16(data, pos)
+        pos += consumed
+    if flags & 0x08:
+        brand, consumed = decode_string_u8(data, pos)
+        pos += consumed
+    if flags & 0x80:
+        chain_count = data[pos]
+        pos += 1
+
+    # The extended word is written only when at least one of its bits is set,
+    # and nothing marks its absence. Every record the builder emits carries a
+    # non-zero source_type, so in the shipped files it is always present —
+    # decode_block cross-checks the record count against the index to catch it
+    # if that ever stops being true.
+    source_type = source_id = confidence = None
+    if pos + 2 <= len(data):
+        ext_flags = struct.unpack_from("<H", data, pos)[0]
+        pos += 2
+        if ext_flags & 0x01:
+            source_type = SOURCE_TYPES.get(data[pos], "unknown")
+            pos += 1
+        if ext_flags & 0x02:
+            source_id, consumed = decode_string_u16(data, pos)
+            pos += consumed
+        if ext_flags & 0x04:
+            confidence = data[pos]
+            pos += 1
+
+    return {
+        "osm_id": uid,
+        "lon": lon_micro / 100_000,
+        "lat": lat_micro / 100_000,
+        "name": name,
+        "category_idx": category_idx,
+        "phone": phone,
+        "website": website,
+        "address": address,
+        "brand": brand,
+        # v4 dropped the operating-status bits; everything reads as open.
+        "operating_status": "open",
+        "emails": (),
+        "socials": (),
+        "chain_count": chain_count,
+        "source_type": source_type,
+        "source_id": source_id,
+        "confidence": confidence,
+    }, pos - offset
+
+
+def decode_block_v4(data: bytes, cell_center_micro: tuple[int, int],
+                    feature_count: int) -> list[dict]:
+    """Decode a v4 block: `feature_count` back-to-back records, no prefixes."""
+    businesses: list[dict] = []
+    pos = 0
+    for i in range(feature_count):
+        if pos >= len(data):
+            break
+        try:
+            biz, consumed = decode_business_record_v4(
+                data, pos, cell_center_micro,
+            )
+        except Exception as e:
+            logger.warning(
+                "v4 business record %d of %d desynced at byte %d: %s",
+                i, feature_count, pos, e,
+            )
+            break
+        businesses.append(biz)
+        pos += consumed
+    return businesses
+
+
+def decode_block(data: bytes) -> list[dict]:
+    """Decode a v1 block: { u32 record_len + record_body }*."""
     businesses: list[dict] = []
     pos = 0
     while pos < len(data) - 4:
@@ -326,19 +458,19 @@ class BusinessReader:
         self._file = f
         self._filepath = filepath
         self._header = read_header(f)
-        self._is_v2 = self._header["version"] >= 2
 
         # Load zstd dictionary
         f.seek(self._header["dict_offset"])
         self._dict_data = f.read(self._header["dict_length"])
 
-        # Read spatial index (v1: 19-byte entries; v2: 37-byte + bbox + cell_index)
+        # Read the spatial index. Entry width is measured from the section, not
+        # inferred from the record version — the shipped v4 files pair v4
+        # records with a 19-byte v1 index, so version >= 2 is not the same
+        # question as "wide index entries".
         f.seek(self._header["index_offset"])
         index_bytes = f.read(self._header["index_length"])
-        if self._is_v2:
-            self._index = decode_index_v2(index_bytes)
-        else:
-            self._index = read_index(index_bytes)
+        self._index, stride = read_index_auto(index_bytes)
+        self._is_v2 = stride == INDEX_ENTRY_SIZE_V2
 
         # Detect relative offsets (v1 builds use relative; v2 uses absolute)
         self._relative_offsets = True
@@ -359,6 +491,7 @@ class BusinessReader:
         # decompression when walking neighbors.
         self._raw_block_cache: dict[int, bytes] = {}
         self._raw_block_cache_max = 256
+        self._cell_center_cache: dict[int, tuple[int, int]] = {}
 
     @classmethod
     def open(cls, path: str | os.PathLike, *,
@@ -383,18 +516,35 @@ class BusinessReader:
         return self._header
 
     def _load_sidecar_categories(self) -> list[str]:
-        """Load categories from sidecar JSON file."""
+        """Load categories from the sidecar JSON alongside the data file.
+
+        The published files are named ``TX.business_v4.ptiles`` but their
+        sidecar is ``TX.business_categories.json`` — the version suffix is on
+        one and not the other — so try the unversioned name too. Without this
+        every category resolves to None and category filters silently match
+        nothing.
+        """
         base = self._filepath
         if base.endswith(".ptiles"):
             base = base[:-7]
-        sidecar_path = base + "_categories.json"
-        if os.path.exists(sidecar_path):
+        candidates = [base + "_categories.json"]
+        stripped = re.sub(r"_v\d+$", "", base)
+        if stripped != base:
+            candidates.append(stripped + "_categories.json")
+
+        for sidecar_path in candidates:
+            if not os.path.exists(sidecar_path):
+                continue
             try:
                 with open(sidecar_path) as f:
                     data = json.load(f)
                 return data.get("categories", data if isinstance(data, list) else [])
             except Exception as e:
-                logger.warning("Failed to load categories sidecar %s: %s", sidecar_path, e)
+                logger.warning("Failed to load categories sidecar %s: %s",
+                               sidecar_path, e)
+        logger.warning("No categories sidecar found for %s (tried %s); "
+                       "categories will be None",
+                       self._filepath, ", ".join(candidates))
         return []
 
     def _resolve_offset(self, offset: int) -> int:
@@ -430,6 +580,15 @@ class BusinessReader:
         self._raw_block_cache[file_offset] = raw
         return raw
 
+    def _cell_center_micro(self, cell_int: int) -> tuple[int, int]:
+        """H3 cell centre in microdegrees, cached — v4 coords are relative."""
+        cached = self._cell_center_cache.get(cell_int)
+        if cached is None:
+            lat, lon = h3.cell_to_latlng(format(cell_int, "x"))
+            cached = (round(lon * 100_000), round(lat * 100_000))
+            self._cell_center_cache[cell_int] = cached
+        return cached
+
     def _read_block(self, cell_int: int) -> list[dict]:
         """Read and decode a block for a given H3 cell."""
         # Check block cache first
@@ -452,7 +611,13 @@ class BusinessReader:
             raw = self._decompress(compressed)
             if raw is None:
                 return []
-            result = decode_block(raw)
+            if self._header["version"] >= 4:
+                result = decode_block_v4(
+                    raw, self._cell_center_micro(cell_int),
+                    entry["feature_count"],
+                )
+            else:
+                result = decode_block(raw)
 
         # Cache the result
         if len(self._block_cache) >= self._block_cache_max:
@@ -481,6 +646,10 @@ class BusinessReader:
             operating_status=d.get("operating_status", "open"),
             emails=d.get("emails", ()),
             socials=d.get("socials", ()),
+            chain_count=d.get("chain_count"),
+            source_type=d.get("source_type"),
+            source_id=d.get("source_id"),
+            confidence=d.get("confidence"),
         )
 
     def get_in_cell(self, cell: int | str) -> list[Business]:
@@ -523,55 +692,33 @@ class BusinessReader:
                limit: int = 10,
                category_prefix: str | None = None,
                exclude_closed: bool = False) -> list[BusinessHit]:
-        """Find businesses near a point using H3 cell lookup.
+        """Find businesses near a point, nearest first.
 
-        Dynamically determines the search radius in H3 rings based on
-        the requested radius_meters.
+        Spirals outward a ring at a time and stops as soon as the answer is
+        settled. The previous implementation sized a grid_disk from
+        radius_meters and read every cell in it unconditionally, so a 500 m
+        lookup downtown decompressed seven blocks to answer from the first one.
         """
-        cell = h3.latlng_to_cell(lat, lon, 7)
-        radius_km = radius_meters / 1000.0
-        rings_needed = max(0, int(round(radius_km / 1.8)))
+        from ptiles.nearest import nearest as _nearest
 
-        seen_cells: set[int] = set()
-        hits: list[BusinessHit] = []
+        def predicate(biz: Business) -> bool:
+            if exclude_closed and biz.operating_status == "closed":
+                return False
+            if category_prefix is not None:
+                if biz.category is None or not biz.category.startswith(category_prefix):
+                    return False
+            return True
 
-        for neighbor in h3.grid_disk(cell, rings_needed):
-            cell_int = int(neighbor, 16)
-            if cell_int in seen_cells:
-                continue
-            seen_cells.add(cell_int)
+        result = _nearest(
+            self, lat, lon,
+            predicate=predicate,
+            n=limit,
+            max_meters=radius_meters,
+        )
+        return [BusinessHit(business=h.feature, distance_meters=h.distance_meters)
+                for h in result]
 
-            raw = self._read_block(cell_int)
-            if not raw:
-                continue
-
-            for d in raw:
-                biz = self._dict_to_business(d)
-
-                if exclude_closed and biz.operating_status == "closed":
-                    continue
-                if category_prefix is not None:
-                    if biz.category is None or not biz.category.startswith(category_prefix):
-                        continue
-
-                dist = self._haversine(lat, lon, biz.lat, biz.lon)
-                if dist <= radius_meters:
-                    hits.append(BusinessHit(business=biz, distance_meters=dist))
-
-        hits.sort(key=lambda h: h.distance_meters)
-        return hits[:limit]
-
-    @staticmethod
-    def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Haversine distance in meters."""
-        R = 6_371_000.0
-        phi1 = math.radians(lat1)
-        phi2 = math.radians(lat2)
-        dphi = math.radians(lat2 - lat1)
-        dlam = math.radians(lon2 - lon1)
-        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
-        c = 2 * math.asin(math.sqrt(a))
-        return R * c
+    _haversine = staticmethod(haversine_meters)
 
     def close(self) -> None:
         self._file.close()

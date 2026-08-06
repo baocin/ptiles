@@ -19,6 +19,11 @@ from typing import Any
 import h3
 import zstandard as zstd
 
+from ptiles.geometry import (
+    point_in_polygon,
+    point_to_polygon_distance_meters,
+    within_bbox_meters,
+)
 from ptiles.codec import (
     BTYPE_REVERSE,
     decode_varint,
@@ -55,6 +60,13 @@ class Building:
     category: str | None = None
     name_source: str | None = None
     poi_osm_id: int | None = None
+    # Exact height in metres, quantised to 0.5 m steps by the encoder. Rare:
+    # 0.3% of buildings in the shipped v9 files carry one, because it comes
+    # from the OSM `height` tag. None means unknown, never zero.
+    height_m: float | None = None
+    # Coarse bucket, always present in the record but derived from the same
+    # tag — so it reads "unknown" for the same 99.7%.
+    height_tier: str = "unknown"
 
 
 def compute_centroid(coords: tuple[tuple[float, float], ...]) -> tuple[float, float]:
@@ -94,6 +106,7 @@ def decode_building_v8(data: bytes, offset: int, prev_osm_id: int,
         flags = data[pos]
         pos += 1
         vc_packed = (flags >> 4) & 0x0F
+        height_tier = HEIGHT_TIERS.get((flags >> 2) & 0x03, "unknown")
 
         # Vertex count
         if vc_packed == 0x0F:
@@ -139,6 +152,7 @@ def decode_building_v8(data: bytes, offset: int, prev_osm_id: int,
         category = None
         name_source = None
         poi_osm_id = None
+        height_m = None
 
         if flags2 & 0x01:  # has_name
             name, consumed = decode_table_ref(data, pos, string_table)
@@ -154,7 +168,12 @@ def decode_building_v8(data: bytes, offset: int, prev_osm_id: int,
         if flags2 & 0x08:  # has_poi_osm_id
             poi_osm_id = struct.unpack_from("<Q", data, pos)[0]
             pos += 8
-        # flags2 & 0x10: has_height_m (skip)
+        if flags2 & 0x10:  # has_height_m — u8 in 0.5 m steps
+            height_m = data[pos] * 0.5
+            pos += 1
+        # flags2 & 0x20 (shop) and 0x40 (opening_hours) are v9 additions; the
+        # record ends here for our purposes and the caller advances by the
+        # length prefix, so they need no skip.
 
         coords_tuple = tuple(coords_list)
         centroid_lon, centroid_lat = compute_centroid(coords_tuple)
@@ -169,6 +188,8 @@ def decode_building_v8(data: bytes, offset: int, prev_osm_id: int,
             category=category or None,
             name_source=name_source or None,
             poi_osm_id=poi_osm_id,
+            height_m=height_m,
+            height_tier=height_tier,
         )
 
         return building, pos - offset, osm_id
@@ -443,7 +464,12 @@ class BuildingsReader:
         return nearest
 
     def within(self, lat: float, lon: float, meters: float) -> list[Building]:
-        """Find buildings whose footprint is within `meters` of (lat, lon)."""
+        """Find buildings whose footprint is within `meters` of (lat, lon).
+
+        A res-7 cell in a city holds thousands of footprints, so this rejects
+        on the bounding box before measuring edges — the exact distance is only
+        computed for the handful that could plausibly be in range.
+        """
         center_cell = h3.latlng_to_cell(lat, lon, 7)
         cells_to_check = list(set(h3.grid_disk(center_cell, 1)))
 
@@ -451,6 +477,8 @@ class BuildingsReader:
         for cell in cells_to_check:
             cell_int = int(cell, 16) if isinstance(cell, str) else cell
             for bldg in self._read_block(cell_int):
+                if not within_bbox_meters(lon, lat, bldg.coordinates, meters):
+                    continue
                 d = self._point_to_polygon_distance(lon, lat, bldg.coordinates)
                 if d <= meters:
                     results.append(bldg)
@@ -492,52 +520,19 @@ class BuildingsReader:
         self._file.close()
 
     # --- Geometry helpers ---
+    #
+    # Thin wrappers over ptiles.geometry, kept as methods because callers use
+    # them that way. The old private copy measured longitude degrees as though
+    # they were as long as latitude degrees, which overstated east-west
+    # distance by 1/cos(lat) — 28% at DC, 34% at Seattle.
 
     @staticmethod
     def _point_in_polygon(px: float, py: float,
                           poly: tuple[tuple[float, float], ...]) -> bool:
-        inside = False
-        n = len(poly)
-        j = n - 1
-        for i in range(n):
-            xi, yi = poly[i]
-            xj, yj = poly[j]
-            if ((yi > py) != (yj > py)) and \
-               (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
-                inside = not inside
-            j = i
-        return inside
+        return point_in_polygon(px, py, poly)
 
     @staticmethod
-    def _point_to_segment_dist_sq(px: float, py: float,
-                                   x1: float, y1: float,
-                                   x2: float, y2: float) -> float:
-        dx, dy = x2 - x1, y2 - y1
-        len_sq = dx * dx + dy * dy
-        if len_sq == 0.0:
-            dx2, dy2 = px - x1, py - y1
-            return dx2 * dx2 + dy2 * dy2
-        t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / len_sq))
-        proj_x = x1 + t * dx
-        proj_y = y1 + t * dy
-        dx2, dy2 = px - proj_x, py - proj_y
-        return dx2 * dx2 + dy2 * dy2
-
-    def _point_to_polygon_distance(self, px: float, py: float,
-                                    poly: tuple[tuple[float, float], ...]) -> float:
-        min_dist_sq = float("inf")
-        for i in range(len(poly) - 1):
-            d_sq = self._point_to_segment_dist_sq(
-                px, py, poly[i][0], poly[i][1],
-                poly[i + 1][0], poly[i + 1][1],
-            )
-            if d_sq < min_dist_sq:
-                min_dist_sq = d_sq
-        if len(poly) > 1:
-            d_sq = self._point_to_segment_dist_sq(
-                px, py, poly[-1][0], poly[-1][1],
-                poly[0][0], poly[0][1],
-            )
-            if d_sq < min_dist_sq:
-                min_dist_sq = d_sq
-        return math.sqrt(min_dist_sq) * 111_000
+    def _point_to_polygon_distance(px: float, py: float,
+                                   poly: tuple[tuple[float, float], ...]) -> float:
+        """Distance to the footprint edge. Zero when the point is inside."""
+        return point_to_polygon_distance_meters(px, py, poly)

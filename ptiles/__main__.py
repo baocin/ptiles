@@ -10,6 +10,11 @@ Usage:
     python -m ptiles nearest-road FILE LAT LON    Find nearest road
     python -m ptiles nearby business FILE LAT LON --radius 500 --limit 5
     python -m ptiles route ROADS A_LAT A_LON B_LAT B_LON
+
+    python -m ptiles nearest business FILE LAT LON --name "Taco Bell"
+    python -m ptiles nearest water    FILE LAT LON --type river,stream
+    python -m ptiles seen-by US.camera.ptiles LAT LON [--buildings ST.buildings_v9.ptiles]
+    python -m ptiles sun     US.admin.ptiles  LAT LON [--at ISO8601] [--buildings ...]
 """
 
 from __future__ import annotations
@@ -191,6 +196,180 @@ def cmd_query_admin(args: argparse.Namespace) -> None:
         reader.close()
 
 
+NEAREST_READERS = {
+    "business": ("ptiles.business", "BusinessReader"),
+    "camera": ("ptiles.camera", "CameraReader"),
+    "signals": ("ptiles.signals", "SignalsReader"),
+    "water": ("ptiles.water", "WaterReader"),
+    "parks": ("ptiles.parks", "ParkReader"),
+    "rail": ("ptiles.rail", "RailReader"),
+    "places": ("ptiles.places", "PlacesReader"),
+    "buildings": ("ptiles.buildings", "BuildingsReader"),
+}
+
+
+def _representative_point(f) -> tuple[float | None, float | None]:
+    """A single lat/lon for a feature, whatever its geometry.
+
+    Point layers carry scalar lat/lon; line and area layers only have a
+    coordinate list, so report its midpoint rather than nothing.
+    """
+    lat = getattr(f, "lat", None)
+    lon = getattr(f, "lon", None)
+    if lat is not None and lon is not None:
+        return lat, lon
+    lat = getattr(f, "centroid_lat", None)
+    lon = getattr(f, "centroid_lon", None)
+    if lat is not None and lon is not None:
+        return round(lat, 5), round(lon, 5)
+    coords = getattr(f, "coordinates", None) or getattr(f, "coords", None)
+    if coords:
+        mid = coords[len(coords) // 2]
+        return round(mid[1], 5), round(mid[0], 5)
+    return None, None
+
+
+def cmd_nearest(args: argparse.Namespace) -> None:
+    """Spiral outward from a point until the nearest matches are settled."""
+    import importlib
+    from ptiles.nearest import match_attr, match_name, nearest
+
+    module_name, cls_name = NEAREST_READERS[args.layer]
+    reader_cls = getattr(importlib.import_module(module_name), cls_name)
+    reader = reader_cls.open(args.file)
+    try:
+        predicate = None
+        if args.name:
+            predicate = match_name(args.name)
+        elif args.type:
+            attr = {"water": "water_type", "signals": "signal_type",
+                    "camera": "device_type", "places": "place_type",
+                    "rail": "rail_type", "buildings": "building_type",
+                    }.get(args.layer, "category")
+            predicate = match_attr(attr, *args.type.split(","))
+
+        result = nearest(reader, args.lat, args.lon, predicate=predicate,
+                         n=args.limit, max_meters=args.radius)
+
+        out = []
+        for hit in result:
+            f = hit.feature
+            lat, lon = _representative_point(f)
+            out.append({
+                "distance_meters": round(hit.distance_meters, 1),
+                "name": getattr(f, "name", None),
+                "type": (getattr(f, "water_type", None)
+                         or getattr(f, "signal_type", None)
+                         or getattr(f, "device_type", None)
+                         or getattr(f, "category", None)
+                         or getattr(f, "building_type", None)),
+                "osm_id": getattr(f, "osm_id", None),
+                "lat": lat,
+                "lon": lon,
+            })
+        print(json.dumps({
+            "hits": out,
+            "rings_scanned": result.rings_scanned,
+            "cells_read": result.cells_read,
+            "features_examined": result.features_examined,
+            "exhausted": result.exhausted,
+        }, indent=2))
+    finally:
+        reader.close()
+
+
+def cmd_seen_by(args: argparse.Namespace) -> None:
+    """Which cameras are aimed at this point."""
+    from ptiles.camera import CameraReader
+    from ptiles.visibility import cameras_seeing
+
+    reader = CameraReader.open(args.file)
+    buildings = None
+    try:
+        if args.buildings:
+            from ptiles.buildings import BuildingsReader
+            buildings = BuildingsReader.open(args.buildings)
+
+        sightings = cameras_seeing(
+            args.lat, args.lon, reader,
+            buildings=buildings,
+            max_meters=args.radius,
+            include_occluded=args.include_occluded,
+        )
+        print(json.dumps({
+            "cameras_seeing": [
+                {
+                    "osm_id": s.camera.osm_id,
+                    "device_type": s.camera.device_type,
+                    "camera_type": s.camera.camera_type,
+                    "operator": s.camera.operator,
+                    "distance_meters": round(s.distance_meters, 1),
+                    "bearing_from_camera": round(s.bearing_from_camera, 1),
+                    "off_axis_degrees": (round(s.off_axis_degrees, 1)
+                                         if s.off_axis_degrees is not None else None),
+                    "confidence": s.confidence.value,
+                    "assumed_range_m": s.assumed_range_m,
+                    "assumed_fov_deg": s.assumed_fov_deg,
+                    "occluded_by": s.occluded_by,
+                }
+                for s in sightings
+            ],
+            # Stated so a caller never mistakes a defaulted cone for a
+            # measured one.
+            "note": ("range is always assumed (not in the format); field of "
+                     "view is assumed unless confidence is 'certain'"),
+        }, indent=2))
+    finally:
+        reader.close()
+        if buildings is not None:
+            buildings.close()
+
+
+def cmd_sun(args: argparse.Namespace) -> None:
+    """Sun position, local time, and optionally whether a point is shaded."""
+    from datetime import datetime, timezone
+    from ptiles.admin import AdminReader
+    from ptiles.sun import is_shaded, local_time, sun_position
+
+    when = (datetime.fromisoformat(args.at) if args.at
+            else datetime.now(timezone.utc))
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+
+    admin = AdminReader.open(args.file)
+    out: dict = {}
+    try:
+        info = admin.query(args.lat, args.lon)
+        loc = local_time(args.lat, args.lon, admin, when)
+        pos = sun_position(args.lat, args.lon, when)
+        out = {
+            "timezone": info.timezone if info else None,
+            "local_time": loc.isoformat(),
+            "utc": when.astimezone(timezone.utc).isoformat(),
+            "azimuth": round(pos.azimuth, 2),
+            "altitude": round(pos.altitude, 2),
+            "sun_is_up": pos.is_up,
+        }
+        if args.buildings:
+            from ptiles.buildings import BuildingsReader
+            b = BuildingsReader.open(args.buildings)
+            try:
+                shade = is_shaded(args.lat, args.lon, b, when)
+                out["shade"] = {
+                    # None means unknown, and is not the same as sunlit.
+                    "shaded": shade.shaded,
+                    "shaded_by": shade.shaded_by,
+                    "buildings_considered": shade.buildings_considered,
+                    "buildings_with_height": shade.buildings_with_height,
+                    "reason": shade.reason,
+                }
+            finally:
+                b.close()
+    finally:
+        admin.close()
+    print(json.dumps(out, indent=2))
+
+
 def cmd_route(args: argparse.Namespace) -> None:
     from ptiles.router import PtilesRouter
     router = PtilesRouter.open(args.file)
@@ -244,6 +423,40 @@ def main() -> None:
                       help="Max results")
     p_nb.add_argument("--category-prefix", help="Filter by category prefix")
 
+    # nearest
+    p_ne = subparsers.add_parser(
+        "nearest", help="Nearest feature by name or type (spirals outward)")
+    p_ne.add_argument("layer", choices=sorted(NEAREST_READERS))
+    p_ne.add_argument("file", help="Path to the layer's .ptiles file")
+    p_ne.add_argument("lat", type=float)
+    p_ne.add_argument("lon", type=float)
+    p_ne.add_argument("--name", help='Match name or brand, e.g. "Taco Bell"')
+    p_ne.add_argument("--type", help="Match type, comma-separated, e.g. river,stream")
+    p_ne.add_argument("--limit", type=int, default=1, help="How many to return")
+    p_ne.add_argument("--radius", type=float, default=None,
+                      help="Give up beyond this many meters")
+
+    # seen-by
+    p_sb = subparsers.add_parser(
+        "seen-by", help="Which cameras are aimed at this point")
+    p_sb.add_argument("file", help="Path to US.camera.ptiles")
+    p_sb.add_argument("lat", type=float)
+    p_sb.add_argument("lon", type=float)
+    p_sb.add_argument("--radius", type=float, default=None,
+                      help="Cap distance; default is each device's assumed range")
+    p_sb.add_argument("--buildings", help="Buildings file, to test occlusion")
+    p_sb.add_argument("--include-occluded", action="store_true",
+                      help="Keep blocked sightlines, flagged rather than dropped")
+
+    # sun
+    p_su = subparsers.add_parser(
+        "sun", help="Sun position and local time; shade with --buildings")
+    p_su.add_argument("file", help="Path to US.admin.ptiles")
+    p_su.add_argument("lat", type=float)
+    p_su.add_argument("lon", type=float)
+    p_su.add_argument("--at", help="ISO 8601 instant; default now")
+    p_su.add_argument("--buildings", help="Buildings file, to test shade")
+
     # route
     p_rt = subparsers.add_parser("route", help="Compute a route")
     p_rt.add_argument("file", help="Path to .roads.ptiles file")
@@ -274,6 +487,12 @@ def main() -> None:
             cmd_nearby_business(args)
         else:
             print(f"Unknown nearby layer: {args.layer}")
+    elif args.command == "nearest":
+        cmd_nearest(args)
+    elif args.command == "seen-by":
+        cmd_seen_by(args)
+    elif args.command == "sun":
+        cmd_sun(args)
     elif args.command == "route":
         cmd_route(args)
     else:

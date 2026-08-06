@@ -62,6 +62,62 @@ from shared import (
 
 HEIGHT_TIERS = {0: "unknown", 1: "1-2", 2: "3-5", 3: "6+"}
 
+# Metres per storey, used when a footprint states `building:levels` but not
+# `height`. 3.2 m is a common mixed residential/commercial average; the point
+# is to have *a* height where there would otherwise be none, not to be
+# accurate to the storey.
+#
+# This matters more than it looks. Measured on the DC extract: `height` is on
+# 0.31% of building ways, `building:levels` on 36.51%. Reading only `height`
+# leaves 99.7% of footprints with no height at all, which is what the shipped
+# v9 files contain.
+METERS_PER_LEVEL = 3.2
+
+
+def parse_height(value) -> float | None:
+    """Parse an OSM `height` tag to metres.
+
+    The tag is nominally bare metres, but a minority carry a unit and a few
+    use feet. Anything unparseable is dropped rather than guessed.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        height = float(value)
+    else:
+        text = str(value).strip().lower()
+        if not text:
+            return None
+        scale = 1.0
+        for suffix, factor in (("meter", 1.0), ("metre", 1.0), ("feet", 0.3048),
+                               ("ft", 0.3048), ("m", 1.0), ("'", 0.3048)):
+            if text.endswith(suffix):
+                text = text[: -len(suffix)].strip()
+                scale = factor
+                break
+        try:
+            height = float(text) * scale
+        except ValueError:
+            return None
+    # Guard against typos: the encoder clamps at 127.5 m anyway, and a
+    # negative or absurd height is worse than none.
+    if height <= 0 or height > 1000:
+        return None
+    return height
+
+
+def parse_levels(value) -> float | None:
+    """Parse an OSM `building:levels` tag to a storey count."""
+    if value is None:
+        return None
+    try:
+        levels = float(str(value).strip())
+    except ValueError:
+        return None
+    if levels <= 0 or levels > 200:
+        return None
+    return levels
+
 
 def classify_height_tier(height_m: float | None) -> int:
     """Classify height in meters to tier."""
@@ -346,6 +402,8 @@ def decode_building_v8(
     has_name_source = flags2 & 0x04
     has_poi_osm_id = flags2 & 0x08
     has_height_m = flags2 & 0x10
+    has_business_tag = flags2 & 0x20  # v9: shop/amenity tag
+    has_opening_hours = flags2 & 0x40  # v9: OSM opening_hours string
 
     building = {
         "osm_id": osm_id,
@@ -374,6 +432,14 @@ def decode_building_v8(
     if has_height_m:
         building["height_m"] = data[pos] * 0.5
         pos += 1
+    if has_business_tag:
+        tag, consumed = decode_table_ref(data, pos, string_table)
+        building["business_tag"] = tag
+        pos += consumed
+    if has_opening_hours:
+        oh, consumed = decode_string_u8(data, pos)
+        building["opening_hours"] = oh
+        pos += consumed
 
     # Calculate centroid
     if coords:

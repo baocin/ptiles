@@ -545,9 +545,6 @@ WATER_TYPES = [
 #   - Merged blocks (multiple sparse H3 cells share one zstd block)
 #   - u16 cell-relative coordinates (saves bytes vs i32)
 
-INDEX_ENTRY_SIZE_V2 = 37  # 8 + 4*4 + 6 + 3 + 2 + 2
-
-
 def decode_coords_u16(
     data: bytes,
     pos: int,
@@ -621,6 +618,39 @@ def decode_index_v2(data: bytes) -> list[dict]:
         entries.append(decode_index_entry_v2(data, pos))
         pos += INDEX_ENTRY_SIZE_V2
     return entries
+
+
+def index_entry_stride(data: bytes) -> int:
+    """Work out the index entry width from the section itself.
+
+    Entry width does not follow the record-format version: the shipped v4
+    business files pair v4 records with a 19-byte v1 index, while camera and
+    signals use 38-byte entries. Anything that infers one from the other reads
+    garbage or overruns, so measure instead — the section is exactly
+    ``4 + entry_count * stride`` and that pins it.
+    """
+    if len(data) < 4:
+        raise ValueError(f"index section too short: {len(data)} bytes")
+    entry_count = struct.unpack_from("<I", data, 0)[0]
+    if entry_count == 0:
+        return INDEX_ENTRY_SIZE
+    payload = len(data) - 4
+    stride, remainder = divmod(payload, entry_count)
+    if remainder or stride not in (INDEX_ENTRY_SIZE, INDEX_ENTRY_SIZE_V2):
+        raise ValueError(
+            f"cannot determine index stride: {entry_count} entries in "
+            f"{payload} bytes implies {payload / entry_count:g} bytes each, "
+            f"expected {INDEX_ENTRY_SIZE} or {INDEX_ENTRY_SIZE_V2}"
+        )
+    return stride
+
+
+def read_index_auto(data: bytes) -> tuple[list[dict], int]:
+    """Parse a spatial index of either width. Returns (entries, stride)."""
+    stride = index_entry_stride(data)
+    if stride == INDEX_ENTRY_SIZE_V2:
+        return decode_index_v2(data), stride
+    return read_index(data), stride
 
 
 def decode_merged_block_header(data: bytes) -> dict:

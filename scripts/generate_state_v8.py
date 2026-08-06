@@ -34,7 +34,12 @@ from shared import (
     write_index as _write_index,
     encode_index_entry,
 )
-from encode_v8 import encode_block_v8
+from encode_v8 import (
+    METERS_PER_LEVEL,
+    encode_block_v8,
+    parse_height,
+    parse_levels,
+)
 from states import STATES, get_state, state_bbox
 
 PMTILES_URL = "http://localhost:8099"
@@ -113,12 +118,21 @@ def extract_buildings(tile_data):
                 continue
             coords = [(float(p[0]), float(p[1])) for p in ring]
             props = feat.get("properties", {})
+            # Same fallback as the PBF path in build_state_v8.py: `height` is
+            # on ~0.3% of US footprints and `building:levels` on ~37%, so
+            # without this almost nothing has a usable height. Explicit height
+            # still wins.
+            height = parse_height(props.get("height"))
+            if height is None:
+                levels = parse_levels(props.get("building:levels"))
+                if levels is not None:
+                    height = levels * METERS_PER_LEVEL
             out.append({
                 "osm_id": props.get("id") or props.get("osm_id") or 0,
                 "coords": coords,
                 "building_type": props.get("building") or props.get("building:use") or "yes",
                 "name": props.get("name"),
-                "height_m": props.get("height"),
+                "height_m": height,
             })
     return out
 

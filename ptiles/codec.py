@@ -208,6 +208,23 @@ HEADER_STRUCT = struct.Struct("<7sB B 3x f f f f Q I Q I Q I Q Q I 172x")
 # + blocks_offset(8) + aux_offset(8) + aux_length(4) + reserved(172)
 
 
+def _check_magic(magic: bytes) -> None:
+    """Reject a magic that would lose characters to the 7-byte field.
+
+    The header stores 7 ASCII bytes plus a NUL, and the pack below slices
+    `magic[:7]`. A longer identifier is therefore silently shortened, which is
+    how the address layer came to ship as PTILESA — the admin magic — for want
+    of one truncated character.
+    """
+    body = magic.rstrip(b"\x00")
+    if len(body) > 7:
+        raise ValueError(
+            f"magic {magic!r} is {len(body)} bytes before padding; only the "
+            f"first 7 are written, so it would land as {body[:7]!r}. "
+            f"Layer magics are 7 ASCII bytes plus an optional NUL."
+        )
+
+
 def write_header(
     f: io.BufferedWriter,
     magic: bytes,
@@ -227,6 +244,7 @@ def write_header(
     aux_length: int = 0,
 ):
     """Write 256-byte PTiles header."""
+    _check_magic(magic)
     header = HEADER_STRUCT.pack(
         magic[:7],
         0,  # magic + null terminator

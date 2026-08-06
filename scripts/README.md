@@ -21,7 +21,7 @@ records what the **shipped** files actually contain, read back from
 | Places | `{ST}.places_v1.ptiles` | `PTILESP` | 1 | `build_places.py` | per-state OSM PBF |
 | Parks | `{ST}.parks_v1.ptiles` | `PTILESN` | 1 | `build_parks.py` | OSM + PAD-US |
 | Rail | `{ST}.rail_v1.ptiles` | `PTILEST` | 1 | `build_rail.py` | per-state OSM PBF |
-| Address | `{ST}.address_v1.ptiles` | `PTILESA` ⚠ | 1 | `build_address.py` | per-state OSM PBF |
+| Address | `{ST}.address_v1.ptiles` | `PTILESD` † | 1 | `build_address.py` | per-state OSM PBF |
 | Admin | `US.admin.ptiles` | `PTILESA` | 1 | `build_admin.py` | Census shapefiles |
 | Cameras | `US.camera.ptiles` | `PTILESC` | 1 | `build_points.py --layer camera` | per-state OSM PBF |
 | Signals | `US.signals.ptiles` | `PTILESS` | 1 | `build_points.py --layer signals` | per-state OSM PBF |
@@ -32,13 +32,20 @@ Two entries need explaining:
 rewrites it to the v2 index (37/38-byte entries with a per-cell bbox). Running
 only the first leaves you with files the current readers treat as v1.
 
-**Address collides with admin.** `build_address.py` sets
-`MAGIC = b"PTILESA2\x00"`, but `shared.write_header` packs `magic[:7]`, so the
-trailing `2` never reaches the file and address ships as `PTILESA` — the admin
-magic. `SPEC.md` reserves `PTILESD` for address. Confirmed against a shipped
-file. Nothing reads address yet, so nothing is broken today, but a reader that
-dispatches on magic cannot tell the two layers apart. Fixing the builder means
-the shipped files stop matching it until they are rebuilt and republished.
+**† Address magic was wrong, and published files still carry it.**
+`build_address.py` used to set `MAGIC = b"PTILESA2\x00"`; `write_header` packs
+`magic[:7]`, so the trailing `2` was dropped and address shipped as `PTILESA` —
+the admin magic. The builder now stamps `PTILESD` per `SPEC.md`, and
+`write_header` raises rather than truncating, in both `shared.py` and
+`ptiles/codec.py`.
+
+Every address file published up to and including `v4-20260711` still carries
+`PTILESA` and is indistinguishable from an admin file by magic byte. They are
+only corrected by a rebuild and republish. Until then a reader dispatching on
+magic must either accept `PTILESA` for address — and disambiguate some other
+way, e.g. the filename — or refuse pre-fix files outright. `python -m ptiles
+inspect` reports `PTILESA` as "admin (or a pre-fix address file)" for this
+reason.
 
 ## Shared modules
 

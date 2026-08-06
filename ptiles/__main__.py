@@ -38,14 +38,20 @@ from ptiles.business import BusinessReader
 logger = logging.getLogger("ptiles.cli")
 
 MAGIC_TO_LAYER = {
-    b"PTILESF": "buildings_v8",
+    b"PTILESF": "buildings",
     b"PTILESR": "roads",
-    b"PTILESA": "admin",
+    # Address files built before the PTILESD fix also carry PTILESA, so this
+    # name is ambiguous for anything from v4-20260711 or earlier.
+    b"PTILESA": "admin (or a pre-fix address file)",
+    b"PTILESD": "address",
     b"PTILESW": "water",
     b"PTILESP": "places",
     b"PTILEST": "rail",
     b"PTILESN": "parks",
     b"PTILESB": "business",
+    b"PTILESX": "business_name_index",
+    b"PTILESC": "camera",
+    b"PTILESS": "signals",
 }
 
 

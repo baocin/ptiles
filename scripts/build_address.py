@@ -30,7 +30,12 @@ from states import STATES, get_state
 
 OUTPUT_DIR = Path("/home/aoi/kino/projects/ptiles/data/states")
 PBF_DIR = Path("/mnt/aoi/kino/ptiles/pbfs")
-MAGIC = b"PTILESA2\x00"
+# PTILESD per SPEC.md. This was b"PTILESA2\x00" — nine bytes, of which
+# write_header keeps only the first seven, so the "2" was dropped and every
+# address file shipped carrying PTILESA, the *admin* magic. Files built before
+# this fix are indistinguishable from admin files by their magic byte and need
+# rebuilding to be identified correctly.
+MAGIC = b"PTILESD\x00"
 VERSION = 1
 H3_RES = 7
 

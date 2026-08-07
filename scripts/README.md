@@ -19,14 +19,25 @@ records what the **shipped** files actually contain, read back from
 | Roads | `roads/{ST}.roads.ptiles` | `PTILESR` | 2 | `build_roads.py` → `upgrade_roads_v2.py` | per-state OSM PBF |
 | Water | `{ST}.water_v1.ptiles` | `PTILESW` | 1 | `build_water.py` | per-state OSM PBF |
 | Places | `{ST}.places_v1.ptiles` | `PTILESP` | 1 | `build_places.py` | per-state OSM PBF |
-| Parks | `{ST}.parks_v1.ptiles` | `PTILESN` | 1 | `build_parks.py` | OSM + PAD-US |
+| Parks | `{ST}.parks_v1.ptiles` | `PTILESN` | 1 | `build_parks.py` | per-state OSM PBF |
 | Rail | `{ST}.rail_v1.ptiles` | `PTILEST` | 1 | `build_rail.py` | per-state OSM PBF |
-| Address | `{ST}.address_v1.ptiles` | `PTILESD` † | 1 | `build_address.py` | per-state OSM PBF |
+| Address | `{ST}.address_v2.ptiles` ‡ | `PTILESD` † | 2 | `build_address.py` | per-state OSM PBF |
 | Admin | `US.admin.ptiles` | `PTILESA` | 1 | `build_admin.py` | Census shapefiles |
 | Cameras | `US.camera.ptiles` | `PTILESC` | 1 | `build_points.py --layer camera` | per-state OSM PBF |
 | Signals | `US.signals.ptiles` | `PTILESS` | 1 | `build_points.py --layer signals` | per-state OSM PBF |
 
-Two entries need explaining:
+Three entries need explaining:
+
+**‡ Address is now v2, and the table above no longer matches `v4-20260711`.**
+Everything else in this table still describes the shipped files. Address does
+not: `build_address.py` is `VERSION = 2` since the magic fix below, so it now
+emits `{ST}.address_v2.ptiles` where the published set holds `address_v1`.
+
+Filenames carry the version because each builder derives the suffix from its own
+`VERSION` constant rather than hardcoding it — the name cannot drift from the
+version byte in the header. Layers with no version in the published name
+(`roads`, `business_name_index`, `admin`, `camera`, `signals`) are left alone.
+
 
 **Roads is a two-step.** `build_roads.py` writes v1, then `upgrade_roads_v2.py`
 rewrites it to the v2 index (37/38-byte entries with a per-cell bbox). Running

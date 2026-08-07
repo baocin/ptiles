@@ -3,7 +3,14 @@
 US States + DC metadata for PTILES generation.
 
 FIPS codes, postal abbreviations, and tight bounding boxes (WGS84).
-BBoxes are conservative (include buffer) to ensure no clipping at borders.
+BBoxes are derived from the Census 2023 cartographic boundary file
+(cb_2023_us_state_500k) padded by 0.05 deg and rounded outward, so each box
+is guaranteed to contain its state's full extent. Do not hand-edit: values
+rounded to 1dp round DOWN on many borders and silently clip.
+
+Alaska crosses the antimeridian (Census bounds -179.147 .. 179.778). A single
+min/max lon pair cannot express that, so AK spans longitude fully; treat its
+lon range as 'unbounded', not as a meaningful extent.
 """
 
 from typing import NamedTuple
@@ -20,59 +27,59 @@ class State(NamedTuple):
 
 
 # All 50 states + District of Columbia
-# Bounding boxes are padded slightly to avoid edge clipping
+# Census-derived, padded 0.05 deg, rounded outward -- see module docstring
 STATES: list[State] = [
-    State("01", "AL", "Alabama", -88.5, 30.0, -84.9, 35.0),
-    State("02", "AK", "Alaska", -173.0, 51.0, -130.0, 71.5),
-    State("04", "AZ", "Arizona", -115.0, 31.3, -109.0, 37.0),
-    State("05", "AR", "Arkansas", -94.6, 33.0, -89.0, 36.5),
-    State("06", "CA", "California", -124.5, 32.5, -114.1, 42.0),
-    State("08", "CO", "Colorado", -109.1, 37.0, -102.0, 41.0),
-    State("09", "CT", "Connecticut", -73.7, 40.9, -71.8, 42.1),
-    State("10", "DE", "Delaware", -75.8, 38.4, -75.0, 39.9),
-    State("11", "DC", "District of Columbia", -77.2, 38.8, -76.9, 39.0),
-    State("12", "FL", "Florida", -87.6, 24.4, -80.0, 31.0),
-    State("13", "GA", "Georgia", -85.6, 30.0, -78.4, 35.0),
-    State("15", "HI", "Hawaii", -160.5, 18.9, -154.8, 22.3),
-    State("16", "ID", "Idaho", -117.0, 42.0, -111.0, 49.0),
-    State("17", "IL", "Illinois", -91.5, 36.9, -87.0, 42.5),
-    State("18", "IN", "Indiana", -88.1, 37.8, -84.8, 41.8),
-    State("19", "IA", "Iowa", -96.6, 40.4, -90.1, 43.5),
-    State("20", "KS", "Kansas", -102.1, 37.0, -94.6, 40.0),
-    State("21", "KY", "Kentucky", -89.6, 36.5, -82.0, 39.2),
-    State("22", "LA", "Louisiana", -94.1, 28.9, -88.8, 33.0),
-    State("23", "ME", "Maine", -71.1, 43.0, -66.9, 47.5),
-    State("24", "MD", "Maryland", -79.5, 37.9, -75.0, 39.8),
-    State("25", "MA", "Massachusetts", -73.5, 41.2, -69.9, 42.9),
-    State("26", "MI", "Michigan", -90.4, 41.7, -82.4, 48.3),
-    State("27", "MN", "Minnesota", -97.3, 43.5, -89.5, 49.4),
-    State("28", "MS", "Mississippi", -91.7, 30.0, -88.1, 35.0),
-    State("29", "MO", "Missouri", -95.8, 35.9, -89.1, 40.6),
-    State("30", "MT", "Montana", -116.1, 44.4, -104.0, 49.0),
-    State("31", "NE", "Nebraska", -104.1, 40.0, -95.3, 43.0),
-    State("32", "NV", "Nevada", -120.0, 35.0, -114.0, 42.0),
-    State("33", "NH", "New Hampshire", -72.6, 42.7, -70.6, 45.3),
-    State("34", "NJ", "New Jersey", -75.6, 38.9, -73.9, 41.4),
-    State("35", "NM", "New Mexico", -109.1, 31.3, -103.0, 37.0),
-    State("36", "NY", "New York", -79.8, 40.5, -71.8, 45.0),
-    State("37", "NC", "North Carolina", -84.3, 33.8, -75.4, 36.6),
-    State("38", "ND", "North Dakota", -104.1, 45.9, -96.5, 49.0),
-    State("39", "OH", "Ohio", -84.8, 38.4, -80.5, 41.7),
-    State("40", "OK", "Oklahoma", -103.0, 33.6, -94.4, 37.0),
-    State("41", "OR", "Oregon", -124.6, 41.9, -116.5, 46.3),
-    State("42", "PA", "Pennsylvania", -80.5, 39.7, -74.7, 42.3),
-    State("44", "RI", "Rhode Island", -71.9, 41.1, -71.1, 42.0),
-    State("45", "SC", "South Carolina", -83.4, 32.0, -78.5, 35.2),
-    State("46", "SD", "South Dakota", -104.1, 42.5, -96.4, 45.9),
-    State("47", "TN", "Tennessee", -90.3, 34.9, -81.6, 36.7),
-    State("48", "TX", "Texas", -106.7, 25.8, -93.5, 36.5),
-    State("49", "UT", "Utah", -114.1, 37.0, -109.0, 42.0),
-    State("50", "VT", "Vermont", -73.5, 42.7, -71.5, 45.0),
-    State("51", "VA", "Virginia", -83.7, 36.5, -75.2, 39.5),
-    State("53", "WA", "Washington", -124.8, 45.5, -116.9, 49.0),
-    State("54", "WV", "West Virginia", -82.7, 37.2, -77.7, 40.6),
-    State("55", "WI", "Wisconsin", -93.0, 42.5, -86.8, 47.3),
-    State("56", "WY", "Wyoming", -111.1, 41.0, -104.0, 45.0),
+    State("01", "AL", "Alabama", -88.53, 30.17, -84.83, 35.06),
+    State("02", "AK", "Alaska", -180.0, 51.16, 180.0, 71.44),
+    State("04", "AZ", "Arizona", -114.87, 31.28, -108.99, 37.06),
+    State("05", "AR", "Arkansas", -94.67, 32.95, -89.59, 36.55),
+    State("06", "CA", "California", -124.46, 32.48, -114.08, 42.06),
+    State("08", "CO", "Colorado", -109.12, 36.94, -101.99, 41.06),
+    State("09", "CT", "Connecticut", -73.78, 40.93, -71.73, 42.11),
+    State("10", "DE", "Delaware", -75.84, 38.4, -74.99, 39.89),
+    State("11", "DC", "District of Columbia", -77.17, 38.74, -76.85, 39.05),
+    State("12", "FL", "Florida", -87.69, 24.47, -79.98, 31.06),
+    State("13", "GA", "Georgia", -85.66, 30.3, -80.79, 35.06),
+    State("15", "HI", "Hawaii", -178.39, 18.86, -154.75, 28.46),
+    State("16", "ID", "Idaho", -117.3, 41.93, -110.99, 49.06),
+    State("17", "IL", "Illinois", -91.57, 36.92, -87.44, 42.56),
+    State("18", "IN", "Indiana", -88.15, 37.72, -84.73, 41.82),
+    State("19", "IA", "Iowa", -96.69, 40.32, -90.09, 43.56),
+    State("20", "KS", "Kansas", -102.11, 36.94, -94.53, 40.06),
+    State("21", "KY", "Kentucky", -89.63, 36.44, -81.91, 39.2),
+    State("22", "LA", "Louisiana", -94.1, 28.87, -88.76, 33.07),
+    State("23", "ME", "Maine", -71.14, 42.92, -66.89, 47.51),
+    State("24", "MD", "Maryland", -79.54, 37.86, -74.99, 39.78),
+    State("25", "MA", "Massachusetts", -73.56, 41.18, -69.87, 42.94),
+    State("26", "MI", "Michigan", -90.47, 41.64, -82.36, 48.29),
+    State("27", "MN", "Minnesota", -97.29, 43.44, -89.44, 49.44),
+    State("28", "MS", "Mississippi", -91.71, 30.12, -88.04, 35.05),
+    State("29", "MO", "Missouri", -95.83, 35.94, -89.04, 40.67),
+    State("30", "MT", "Montana", -116.1, 44.3, -103.98, 49.06),
+    State("31", "NE", "Nebraska", -104.11, 39.94, -95.25, 43.06),
+    State("32", "NV", "Nevada", -120.06, 34.95, -113.98, 42.06),
+    State("33", "NH", "New Hampshire", -72.61, 42.64, -70.56, 45.36),
+    State("34", "NJ", "New Jersey", -75.61, 38.87, -73.84, 41.41),
+    State("35", "NM", "New Mexico", -109.11, 31.28, -102.95, 37.06),
+    State("36", "NY", "New York", -79.82, 40.44, -71.8, 45.07),
+    State("37", "NC", "North Carolina", -84.38, 33.79, -75.41, 36.64),
+    State("38", "ND", "North Dakota", -104.1, 45.88, -96.5, 49.06),
+    State("39", "OH", "Ohio", -84.88, 38.35, -80.46, 42.03),
+    State("40", "OK", "Oklahoma", -103.06, 33.56, -94.38, 37.06),
+    State("41", "OR", "Oregon", -124.62, 41.94, -116.41, 46.35),
+    State("42", "PA", "Pennsylvania", -80.57, 39.66, -74.63, 42.32),
+    State("44", "RI", "Rhode Island", -71.92, 41.09, -71.07, 42.07),
+    State("45", "SC", "South Carolina", -83.41, 31.98, -78.49, 35.27),
+    State("46", "SD", "South Dakota", -104.11, 42.42, -96.38, 46.0),
+    State("47", "TN", "Tennessee", -90.37, 34.93, -81.59, 36.73),
+    State("48", "TX", "Texas", -106.7, 25.78, -93.45, 36.56),
+    State("49", "UT", "Utah", -114.11, 36.94, -108.99, 42.06),
+    State("50", "VT", "Vermont", -73.49, 42.67, -71.41, 45.07),
+    State("51", "VA", "Virginia", -83.73, 36.49, -75.19, 39.52),
+    State("53", "WA", "Washington", -124.82, 45.49, -116.86, 49.06),
+    State("54", "WV", "West Virginia", -82.7, 37.15, -77.66, 40.69),
+    State("55", "WI", "Wisconsin", -92.94, 42.44, -86.75, 47.14),
+    State("56", "WY", "Wyoming", -111.11, 40.94, -104.0, 45.06),
 ]
 
 

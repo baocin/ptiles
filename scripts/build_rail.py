@@ -127,7 +127,14 @@ RTI = {t: i for i, t in enumerate(RT)}
 def extract(pbf):
     import osmium
 
-    fp = osmium.FileProcessor(pbf).with_filter(osmium.filter.KeyFilter("railway"))
+    # with_locations() is required: without a node cache every way node reports
+    # an invalid location, so every track way is dropped and only station nodes
+    # survive. Wyoming has no matching station nodes and produced no file at all.
+    fp = (
+        osmium.FileProcessor(pbf)
+        .with_locations()
+        .with_filter(osmium.filter.KeyFilter("railway"))
+    )
     features = []
     for obj in fp:
         is_node = hasattr(obj, "lat")

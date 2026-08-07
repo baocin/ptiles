@@ -15,6 +15,10 @@ Usage:
     # Full US (requires us-latest.osm.pbf from Geofabrik, ~11 GB):
     python build_water.py --source pbf --pbf us-latest.osm.pbf --output US.water.ptiles
 
+    # Per-state batch, one state extract each, into OUTPUT_DIR:
+    python build_water.py --all
+    python build_water.py --states TN,RI
+
 Required packages:
     pip install osmium h3 zstandard shapely
 
@@ -30,6 +34,7 @@ import time
 import json
 import argparse
 from collections import defaultdict
+from pathlib import Path
 
 import h3
 import zstandard as zstd
@@ -42,7 +47,13 @@ from shared import (
     encode_string_u16, encode_string_u8,
     encode_index_entry, train_dictionary,
 )
-from states import STATES as _STATES
+from states import STATES as _STATES, get_state
+
+# Per-state batch build, matching the other builders: PBF_DIR in, OUTPUT_DIR
+# out, one {ST}.water_v{VERSION}.ptiles per state.
+PBF_DIR = Path("/mnt/core/timeline-ptiles-cache/2026-08-06/pbf")
+OUTPUT_DIR = Path("/home/aoi/kino/projects/ptiles/data/states")
+VERSION = 1
 
 # Water type enum (matches Rust WATER_TYPE_REVERSE)
 WATER_TYPES = {
@@ -495,7 +506,7 @@ def build_water_ptiles(features: list[dict], output_path: str):
         write_header(
             f,
             magic=b"PTILESW",
-            version=1,
+            version=VERSION,
             min_lat=min_lat, min_lon=min_lon,
             max_lat=max_lat, max_lon=max_lon,
             feature_count=total_features,
@@ -537,14 +548,70 @@ def build_water_ptiles(features: list[dict], output_path: str):
     print(f"  Large water bodies: {len(large_features)}")
 
 
+def build_state(state) -> bool:
+    """Build one state from its own PBF extract. False means nothing was written."""
+    out = OUTPUT_DIR / f"{state.abbr}.water_v{VERSION}.ptiles"
+    if out.exists():
+        print(f"  SKIP {state.abbr} -- already exists", flush=True)
+        return False
+    # The Geofabrik file name is the state name lowercased with spaces hyphenated;
+    # that matches all 51, so derive it rather than add a seventh copy of the
+    # abbr -> name table the other builders each carry.
+    pbf = PBF_DIR / f"{state.name.lower().replace(' ', '-')}-latest.osm.pbf"
+    if not pbf.exists():
+        print(f"  ERROR {state.abbr}: no pbf at {pbf}", flush=True)
+        return False
+
+    print(f"\n=== {state.abbr} {state.name} ===", flush=True)
+    t0 = time.time()
+    features = extract_water_from_pbf(str(pbf), STATE_BBOX[state.abbr.lower()])
+    if not features:
+        print(f"  {state.abbr}  0 features -- nothing written", flush=True)
+        return False
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    build_water_ptiles(features, str(out))
+    print(f"  {state.abbr:2s} {len(features):8,d} features  "
+          f"{out.stat().st_size:10,d} B  {time.time() - t0:6.1f}s", flush=True)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build water PTiles files from OSM data")
     parser.add_argument("--source", choices=["overpass", "pbf"], default="overpass",
                         help="Data source (overpass or pbf)")
     parser.add_argument("--pbf", help="Path to OSM PBF file (required for --source pbf)")
     parser.add_argument("--region", help="Region name (e.g., tennessee)")
-    parser.add_argument("--output", required=True, help="Output .water.ptiles file path")
+    parser.add_argument("--output", help="Output .water.ptiles file path (single-region mode)")
+    parser.add_argument("--all", action="store_true",
+                        help="Build every state from PBF_DIR into OUTPUT_DIR")
+    parser.add_argument("--states",
+                        help="Comma-separated abbreviations to build into OUTPUT_DIR (e.g. TN,RI)")
     args = parser.parse_args()
+
+    if args.all or args.states:
+        if args.all:
+            targets = list(_STATES)
+        else:
+            targets = []
+            for a in args.states.split(","):
+                s = get_state(a.strip())
+                if s:
+                    targets.append(s)
+                else:
+                    print(f"  ERROR unknown state '{a.strip()}'")
+        built = 0
+        for s in targets:
+            try:
+                built += build_state(s)
+            except Exception as e:
+                print(f"  ERROR {s.abbr}: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+        print(f"\nWATER_COMPLETE built={built} of {len(targets)}")
+        return
+
+    if not args.output:
+        parser.error("--output is required unless --all or --states is given")
 
     if args.source == "overpass":
         if not args.region:

@@ -275,7 +275,7 @@ def build_state(abbr):
         block_idx = idx // bs
         e["block_offset"] = cur + sum(len(cb) for cb in cbs[:block_idx])
     ie.sort(key=lambda e: e["h3_cell"])
-    op = OUTPUT_DIR / f"{abbr}.places.ptiles"
+    op = OUTPUT_DIR / f"{abbr}.places_v{VERSION}.ptiles"
     with open(op, "wb") as f:
         write_header(
             f,

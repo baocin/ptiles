@@ -297,7 +297,7 @@ def build_state(abbr):
                 "block_length": len(cbs[bi]) if bi < len(cbs) else 0,
             }
         )
-    op = OUTPUT_DIR / f"{abbr}.parks.ptiles"
+    op = OUTPUT_DIR / f"{abbr}.parks_v{VERSION}.ptiles"
     with open(op, "wb") as f:
         write_header(
             f,

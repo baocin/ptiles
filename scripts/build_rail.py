@@ -339,7 +339,7 @@ def build_state(abbr):
             }
         )
 
-    op = OUTPUT_DIR / f"{abbr}.rail.ptiles"
+    op = OUTPUT_DIR / f"{abbr}.rail_v{VERSION}.ptiles"
     with open(op, "wb") as f:
         write_header(
             f,

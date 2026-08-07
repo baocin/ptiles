@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Build missing .highways.ptiles for ME and ND."""
+"""Build per-state .highways_v{VERSION}.ptiles from OSM PBF extracts.
+
+    build_us_highways.py --all
+    build_us_highways.py --states TN,KY
+"""
 
 import sys
 import struct
@@ -250,7 +254,7 @@ def build(abbr):
             cb = zstd.ZstdCompressor(level=12).compress(raw)
         compressed_blocks.append(cb)
 
-    out = OUTPUT_DIR / f"{abbr}.highways.ptiles"
+    out = OUTPUT_DIR / f"{abbr}.highways_v{VERSION}.ptiles"
     with open(out, "wb") as f:
         f.write(b"\x00" * HEADER_SIZE)
         dict_offset = HEADER_SIZE
@@ -297,10 +301,27 @@ def build(abbr):
     return {"abbr": abbr, "segments": total, "bytes": sz, "time_s": round(dt, 1)}
 
 
-if __name__ == "__main__":
-    for abbr in sorted(PBF_MAP.keys()):
-        if not get_state(abbr):
-            continue
+def main():
+    import argparse
+
+    p = argparse.ArgumentParser()
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--states")
+    args = p.parse_args()
+
+    targets = []
+    if args.all:
+        targets = [a for a in sorted(PBF_MAP.keys()) if get_state(a)]
+    elif args.states:
+        for a in args.states.split(","):
+            s = get_state(a.strip())
+            if s and s.abbr in PBF_MAP:
+                targets.append(s.abbr)
+    else:
+        p.print_help()
+        return
+
+    for abbr in targets:
         try:
             r = build(abbr)
             if r:
@@ -313,3 +334,7 @@ if __name__ == "__main__":
             import traceback
 
             traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()

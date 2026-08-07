@@ -42,6 +42,7 @@ from shared import (
     encode_string_u16, encode_string_u8,
     encode_index_entry, train_dictionary,
 )
+from states import STATES as _STATES
 
 # Water type enum (matches Rust WATER_TYPE_REVERSE)
 WATER_TYPES = {
@@ -50,14 +51,20 @@ WATER_TYPES = {
     "wetland": 10, "marsh": 11, "swamp": 12, "estuary": 13,
 }
 
-# Bounding boxes for US states (approximate, for Overpass queries)
-STATE_BBOX = {
-    "tennessee": (34.98, -90.31, 36.68, -81.65),
-    "california": (32.53, -124.48, 42.01, -114.13),
-    "new-york": (40.50, -79.76, 45.01, -71.86),
-    "texas": (25.84, -106.65, 36.50, -93.51),
-    "florida": (24.40, -87.63, 31.00, -79.97),
-}
+# Bounding boxes for US states, derived from states.py so there is one source of
+# truth. This used to be a hand-written table holding 5 of 51 states, which meant
+# --region silently resolved to None -- no clipping at all -- for the other 46.
+#
+# NOTE the component order differs from states.py and is not interchangeable:
+# states.py is (min_lon, min_lat, max_lon, max_lat); everything here is
+# (south, west, north, east) == (min_lat, min_lon, max_lat, max_lon), unpacked
+# that way in _in_bbox below.
+STATE_BBOX = {}
+for _s in _STATES:
+    _box = (_s.min_lat, _s.min_lon, _s.max_lat, _s.max_lon)
+    STATE_BBOX[_s.name.lower().replace(" ", "-")] = _box
+    STATE_BBOX[_s.abbr.lower()] = _box
+del _s, _box
 
 
 def classify_water_type(tags: dict) -> int:

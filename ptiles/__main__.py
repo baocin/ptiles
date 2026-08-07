@@ -25,7 +25,7 @@ import logging
 import sys
 import zstandard as zstd
 
-from ptiles.codec import read_header, read_index, HEADER_SIZE
+from ptiles.codec import read_header, read_index, read_index_auto, HEADER_SIZE
 from ptiles.buildings import BuildingsReader
 from ptiles.roads import RoadsReader
 from ptiles.water import WaterReader
@@ -76,12 +76,15 @@ def cmd_inspect(args: argparse.Namespace) -> None:
         print(f"Blocks at: offset={header['blocks_offset']}")
         print(f"Aux:       offset={header['aux_offset']}, len={header['aux_length']}")
 
-        # Also show first few index entries
+        # Also show first few index entries. Entry width has to be measured
+        # rather than assumed -- it does not follow the record-format version,
+        # and reading a 38-byte index at a 19-byte stride yields plausible-looking
+        # nonsense rather than an error (rail and points are 38-byte).
         try:
             f.seek(header["index_offset"])
             idx_bytes = f.read(header["index_length"])
-            idx_entries = read_index(idx_bytes)
-            print(f"\nIndex entries: {len(idx_entries)} total")
+            idx_entries, stride = read_index_auto(idx_bytes)
+            print(f"\nIndex entries: {len(idx_entries)} total ({stride}-byte entries)")
             for i, e in enumerate(idx_entries[:3]):
                 print(f"  [{i}] h3_cell=0x{e['h3_cell']:016x} "
                       f"offset={e['block_offset']} len={e['block_length']} "
@@ -89,7 +92,9 @@ def cmd_inspect(args: argparse.Namespace) -> None:
             if len(idx_entries) > 3:
                 print(f"  ... and {len(idx_entries) - 3} more")
         except Exception as e:
-            pass
+            # Never swallow this: a silent pass here is how the wrong-stride
+            # decode went unnoticed.
+            print(f"\nIndex entries: unreadable -- {type(e).__name__}: {e}")
 
 
 def cmd_query_buildings(args: argparse.Namespace) -> None:

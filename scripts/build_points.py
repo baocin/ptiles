@@ -637,7 +637,6 @@ def verify_file(path, sample=8):
 def run(layers, abbrs, out_stem):
     collected = {name: [] for name in layers}
     seen = {name: set() for name in layers}
-    lats, lons = [], []
     t0 = time.time()
 
     for abbr in abbrs:
@@ -659,16 +658,8 @@ def run(layers, abbrs, out_stem):
             counts.append(f"{name}={len(fresh)}"
                           + (f" (+{len(pts) - len(fresh)} dup)"
                              if len(pts) != len(fresh) else ""))
-        st = get_state(abbr)
-        if st:
-            lats += [st.min_lat, st.max_lat]
-            lons += [st.min_lon, st.max_lon]
         print(f"  {abbr:2s} {' '.join(counts):40s} "
               f"ways_skipped={skipped_ways:<6d} {time.time() - ts:6.1f}s")
-
-    if not lats:
-        raise SystemExit("no states produced a bbox; nothing to write")
-    bbox = (min(lats), min(lons), max(lats), max(lons))
 
     results = []
     for name in layers:
@@ -676,6 +667,13 @@ def run(layers, abbrs, out_stem):
         if not pts:
             print(f"\n{name}: no points found, not writing a file")
             continue
+        # Declare the extent of the data actually written, per layer. This used
+        # to be the union of the states.py boxes, which describes the states
+        # scanned rather than the points found -- and since AK spans the
+        # antimeridian that union covers the whole globe in longitude: true, but
+        # useless to a reader culling by declared bounds.
+        bbox = (min(p["lat"] for p in pts), min(p["lon"] for p in pts),
+                max(p["lat"] for p in pts), max(p["lon"] for p in pts))
         r = write_layer(name, pts, out_stem, bbox)
         v = verify_file(r["path"])
         r["verified"] = v

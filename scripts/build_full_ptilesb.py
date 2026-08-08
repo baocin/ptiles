@@ -93,8 +93,13 @@ def make_unified_id(source, src_id):
 
 
 def load_brand_map():
-    p = "/tmp/overture_brand_map.parquet"
+    # Resolved from STATE_DIR at call time, so redirecting STATE_DIR moves this
+    # too. It used to be hardcoded to /tmp/overture_brand_map.parquet, which is
+    # gone -- and a missing file returns {} rather than failing, so the build kept
+    # succeeding while silently dropping every brand name.
+    p = os.path.join(STATE_DIR, "brand_map.parquet")
     if not os.path.exists(p):
+        print(f"  WARNING: no brand map at {p} -- brands will be empty", flush=True)
         return {}
     t = pq.read_table(p, columns=["overture_id", "brand_name"])
     return dict(
@@ -103,8 +108,11 @@ def load_brand_map():
 
 
 def load_chain_index():
-    p = "/mnt/core/poi_chain_index.parquet"
+    # Same story as the brand map: was /mnt/core/poi_chain_index.parquet, gone,
+    # and absence degraded to every chain_count being 0 without a word.
+    p = os.path.join(STATE_DIR, "chain_index.parquet")
     if not os.path.exists(p):
+        print(f"  WARNING: no chain index at {p} -- chain counts will be 0", flush=True)
         return {}
     t = pq.read_table(p, columns=["name", "count"])
     names = t.column("name").to_pylist()
@@ -323,7 +331,7 @@ def build_state_ptiles(state, brand_map, chain_idx):
     lons = [r["lon"] for r in records]
 
     # Write
-    out = os.path.join(OUT_DIR, f"{state}.business.ptiles")
+    out = os.path.join(OUT_DIR, f"{state}.business_v{VERSION}.ptiles")
     hdr = HEADER_SIZE
     do, dl = hdr, len(dict_data)
     io, il = do + dl, 4 + len(index_entries) * 19
@@ -363,8 +371,10 @@ def build_state_ptiles(state, brand_map, chain_idx):
     print(f"  Written: {size / 1024 / 1024:.1f} MB ({len(records):,} POIs)", flush=True)
     print(f"  Time: {time.time() - st_t0:.1f}s", flush=True)
 
-    # Categories sidecar
-    meta = out.replace(".ptiles", "_categories.json")
+    # Categories sidecar. Named off the state, not off `out`: the published name
+    # is {ST}.business_categories.json, with no version in it, so deriving it
+    # from the versioned .ptiles name would rename the sidecar every version bump.
+    meta = os.path.join(OUT_DIR, f"{state}.business_categories.json")
     with open(meta, "w") as f:
         json.dump(
             {

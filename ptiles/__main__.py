@@ -47,6 +47,7 @@ MAGIC_TO_LAYER = {
     b"PTILESW": "water",
     b"PTILESP": "places",
     b"PTILEST": "rail",
+    b"PTILESH": "trails",
     b"PTILESN": "parks",
     b"PTILESB": "business",
     b"PTILESX": "business_name_index",

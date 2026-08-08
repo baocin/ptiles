@@ -12,6 +12,7 @@ Usage:
 
 import sys
 import os
+import glob
 import struct
 from collections import defaultdict
 
@@ -314,12 +315,16 @@ def main():
         sys.exit(1)
 
     state = sys.argv[1].upper()
-    input_path = os.path.join(DATA_DIR, f"{state}.business.ptiles")
-    output_path = os.path.join(DATA_DIR, f"{state}.business_name_index.ptiles")
-
-    if not os.path.exists(input_path):
-        print(f"ERROR: Input file not found: {input_path}")
+    # The business file carries its own version in the name ({ST}.business_v4.ptiles),
+    # which moves independently of this index's version, so glob for it rather than
+    # hardcode a number here that would silently stop matching on the next bump.
+    candidates = sorted(glob.glob(os.path.join(DATA_DIR, f"{state}.business_v*.ptiles")))
+    if len(candidates) != 1:
+        print(f"ERROR: expected exactly one {state}.business_v*.ptiles in {DATA_DIR}, "
+              f"found {len(candidates)}: {candidates}")
         sys.exit(1)
+    input_path = candidates[0]
+    output_path = os.path.join(DATA_DIR, f"{state}.business_name_index.ptiles")
 
     print(f"Reading {input_path}...", flush=True)
 

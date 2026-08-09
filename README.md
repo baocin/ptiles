@@ -232,7 +232,20 @@ v4 build (2026-07-11) replaces all prior tile sets. Layers:
 | places_v1               | v1     | OSM places                 |
 | parks_v1                | v1     | OSM parks                  |
 | rail_v1                 | v1     | OSM rail lines             |
+| trails_v1               | v1     | OSM paths, tracks, trailheads |
+| ev_v1                   | v1     | OSM `amenity=charging_station` |
 | roads/{ST}.roads.ptiles | v2     | OSM roads                  |
+
+The current build the browser client reads is the dated snapshot rather than
+the `v4-20260711` set:
+
+```
+https://maps.mydatatimeline.com/maps/2026-08-07/{ST}.{layer}.ptiles
+```
+
+`trails_v1` and `ev_v1` are published there only. Both use the 38-byte (v2)
+merged-block index, so a reader must slice its cell out of a block before
+handing the bytes to a record decoder.
 
 ## Building
 
@@ -251,8 +264,25 @@ uv run --with osmium --with h3 --with zstandard --with shapely --with numpy \
 uv run --with osmium --with h3 --with zstandard --with shapely \
     python scripts/build_roads.py data/pbfs/tennessee-latest.osm.pbf data/states/TN.roads.ptiles
 
+# Trails (paths, tracks, trailheads) and EV charging stations. Both read the
+# cached Geofabrik state extracts and take a few seconds per state; PTILES_OUT
+# redirects the output, since data/states is not writable everywhere.
+uv run --with osmium --with h3 --with zstandard python scripts/build_trails.py --all
+PTILES_OUT=/tmp/ev uv run --with osmium --with h3 --with zstandard \
+    python scripts/build_ev.py --all
+
 # Water, business, admin — see scripts/ for each
 ```
+
+### EV layer
+
+13,443 stations across the 51 files, ~675 KB in total. Per station: position,
+access, peak kW, capacity, a connector bitmask and the network. Power and
+connector are tagged on roughly a third of them; the rest encode an explicit
+unknown rather than a zero, because a router that reads unknown as "fine"
+strands people and one that reads it as "unusable" hides most of the rural
+network. The connector bit order in `SOCKETS` is fixed forever — appending is
+safe, inserting renames every connector on every file already published.
 
 ## License
 

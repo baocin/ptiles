@@ -153,6 +153,14 @@ Soil Survey Geographic Database for perc-rate estimation.
 **Critical table:** `cointerp` with rule `"Septic Tank Absorption Field"`
 **License:** Public domain
 
+**Caveat on "perc-rate estimation":** a good chunk of states do not use perc
+tests at all. Virginia plus at least NC, IL, MN, ME, WI and OR evaluate septic
+sites by licensed soil morphology evaluation (a professional reading the soil
+profile in a pit or boring), so no perc-rate records exist there to estimate
+or validate against — only morphology/permit records. Verified regulatory
+citations per state live in the preperc repo at
+`.claude/commands/goal-govdata-states.md`.
+
 (PrePerc is a separate downstream project; SSURGO data work there, not here.)
 
 ### 6. FEMA NFHL (future)

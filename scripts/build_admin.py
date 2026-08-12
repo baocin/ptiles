@@ -26,7 +26,9 @@ from collections import defaultdict
 
 import geopandas as gpd
 import h3
+import h3.api.numpy_int as h3np
 import numpy as np
+import shapely
 from shapely.geometry import Point, shape
 from shapely.prepared import prep
 from shapely.strtree import STRtree
@@ -265,6 +267,69 @@ def build_lookup_grid(cells, states, counties, zcta, tz,
     return grid
 
 
+# Boundary straddle bits (SPEC.md "Boundary flags"). A set bit means the cell
+# spans a jurisdiction edge, so the stored index is only the majority answer and
+# an exact result needs point-in-polygon against the feature table.
+STRADDLE_STATE = 0x01
+STRADDLE_COUNTY = 0x02
+STRADDLE_ZIP = 0x04
+STRADDLE_TZ = 0x08
+
+# Boundaries are sampled rather than intersected: ~0.001 deg is ~110 m, an order
+# of magnitude finer than a res-7 edge (~1.2 km), so an edge cannot cross a cell
+# without landing a sample in it.
+BOUNDARY_SAMPLE_DEG = 0.001
+
+# Geometries per segmentize batch. The whole ZCTA set densified at once is
+# several GB of coordinates; batching keeps peak memory in the hundreds of MB.
+BOUNDARY_BATCH = 500
+
+
+def cells_touching_boundaries(gdf) -> set:
+    """H3 res-7 cells that a dataset's polygon edges pass through."""
+    geoms = shapely.boundary(gdf.geometry.values)
+    hit = set()
+    for start in range(0, len(geoms), BOUNDARY_BATCH):
+        batch = shapely.segmentize(geoms[start:start + BOUNDARY_BATCH],
+                                   BOUNDARY_SAMPLE_DEG)
+        coords = shapely.get_coordinates(batch)
+        if len(coords) == 0:
+            continue
+        hit.update(h3np.latlng_to_cell(lat, lng, 7) for lng, lat in coords)
+    return hit
+
+
+def mark_boundary_cells(grid, states, counties, zcta, tz):
+    """Set boundary_flags on every grid entry whose cell straddles an edge."""
+    print("Marking boundary cells...")
+
+    layers = [
+        ("state", states, STRADDLE_STATE),
+        ("county", counties, STRADDLE_COUNTY),
+        ("zip", zcta, STRADDLE_ZIP),
+        ("tz", tz, STRADDLE_TZ),
+    ]
+
+    flag_by_cell = defaultdict(int)
+    for label, gdf, bit in layers:
+        t0 = time.time()
+        cells = cells_touching_boundaries(gdf)
+        for cell in cells:
+            flag_by_cell[cell] |= bit
+        print(f"  {label}: {len(cells):,} cells touched ({time.time() - t0:.0f}s)")
+
+    marked = 0
+    for entry in grid:
+        flags = flag_by_cell.get(entry["h3_cell"], 0)
+        entry["boundary_flags"] = flags
+        if flags:
+            marked += 1
+
+    print(f"  {marked:,}/{len(grid):,} grid cells flagged "
+          f"({100 * marked / max(len(grid), 1):.1f}%)")
+    return grid
+
+
 def encode_string_table(strings: list[str]) -> bytes:
     """Encode a string table as null-terminated UTF-8 strings."""
     buf = bytearray()
@@ -333,8 +398,10 @@ def encode_boundary_polygons(states, counties, string_tables) -> bytes:
     # County polygons (simplified more aggressively)
     for _, row in counties.iterrows():
         geom = row.geometry
-        name = row["NAME"]
-        county_key = row["STATEFP"] + row["COUNTYFP"]
+        # NAMELSAD carries the real jurisdiction type: Louisiana parishes,
+        # Alaska boroughs and census areas, and Virginia independent cities are
+        # not counties.
+        name = row["NAMELSAD"] if "NAMELSAD" in row.index else f"{row['NAME']} County"
         # Use state_idx 255 to mark county-level (admin_level distinction)
         state_idx = string_tables["state_fips_to_idx"].get(row["STATEFP"], 255)
 
@@ -350,7 +417,7 @@ def encode_boundary_polygons(states, counties, string_tables) -> bytes:
             if len(coords) >= 3:
                 all_polys.append({
                     "state_idx": state_idx,
-                    "name": f"{name} County",
+                    "name": name,
                     "coords": coords,
                 })
 
@@ -401,6 +468,10 @@ def build_admin_ptiles(admin_data_dir: str, output_path: str):
         all_cells, states, counties, zcta, tz,
         state_tree, county_tree, zcta_tree, tz_tree,
         string_tables, cache_path=grid_cache)
+
+    # Flags are recomputed on every run rather than cached with the grid: the
+    # grid cache predates them and is expensive to rebuild.
+    mark_boundary_cells(grid, states, counties, zcta, tz)
 
     # Encode components
     print("Encoding components...")

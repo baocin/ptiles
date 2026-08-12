@@ -443,6 +443,23 @@ Entry size: **16 bytes** (8 + 1 + 1 + 2 + 2 + 1 + 1).
 | 3   | 0x08 | Cell straddles a time zone boundary |
 | 4–7 | —    | Reserved                            |
 
+Populated from `US.admin_v2.ptiles` onward. Every earlier build wrote `0` for
+every cell, so a reader that finds all-zero flags across a file is looking at
+a v1 pack and cannot distinguish "no cell straddles anything" from "this build
+never asked".
+
+Flags are computed by densifying each layer's polygon boundaries at 0.001
+degrees, roughly 110 m and about ten times finer than a res-7 cell edge, then
+setting the layer's bit on every cell a sample lands in. That is a sampling
+test, not an exact intersection: a boundary that clips a cell corner between
+two samples can be missed. In the published v2 build 34.5% of cells carry at
+least one flag, and 3.3% carry the state bit.
+
+A cell with the state bit set means the grid answer is the cell centre's
+jurisdiction and nothing more. Readers that care -- anything choosing a
+per-state data file, for instance -- should fall back to point-in-polygon
+against the boundary polygons in the feature table before trusting it.
+
 When a boundary flag is set, the lookup grid returns the **majority** region for that cell. For exact determination, fall back to point-in-polygon against the feature table polygons.
 
 ### Feature Table

@@ -101,6 +101,8 @@ class BlockFileReader:
         """Whether the index has actually been decoded. For tests and metrics."""
         return self._index_cache is not None
 
+
+
     def resolve_offset(self, offset: int) -> int:
         """Convert relative index offset to absolute file offset."""
         if self._relative_offsets:
@@ -190,3 +192,111 @@ class BlockFileReader:
             self._file.close()
         except Exception:
             pass
+
+
+class MergedBlockReader(BlockFileReader):
+    """Base for layers whose cells are packed several to a compressed block.
+
+    The v2 index (38-byte entries) points at a merged block plus the position of
+    one cell inside it, so a reader has to slice its cell's bytes out before
+    decoding records. Subclasses supply `decode_records`; everything above that
+    -- index lookup, decompression with or without the dictionary, the merged
+    block header, and cell coverage for a bbox -- is the same for all of them.
+
+    PlacesReader predates this and carries its own copy; it works, so it has
+    been left alone rather than refactored under a reader people rely on.
+    """
+
+    def decode_records(self, raw: bytes) -> list:
+        """Decode one cell's record bytes. Implemented by the subclass."""
+        raise NotImplementedError
+
+    def _lookup_index(self, cell_int: int) -> dict | None:
+        entries = self._index
+        lo, hi = 0, len(entries)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if entries[mid]["h3_cell"] < cell_int:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < len(entries) and entries[lo]["h3_cell"] == cell_int:
+            return entries[lo]
+        return None
+
+    def _cell_bytes(self, cell_int: int) -> bytes | None:
+        """Record bytes for one cell, sliced out of its (possibly merged) block."""
+        entry = self._lookup_index(cell_int)
+        if entry is None:
+            return None
+        self._file.seek(self.resolve_offset(entry["block_offset"]))
+        compressed = self._file.read(entry["block_length"])
+
+        import zstandard as zstd
+
+        raw = None
+        if self._dict_data:
+            try:
+                d = zstd.ZstdCompressionDict(self._dict_data)
+                raw = zstd.ZstdDecompressor(dict_data=d).decompress(compressed)
+            except Exception:
+                raw = None
+        if raw is None:
+            try:
+                raw = zstd.ZstdDecompressor().decompress(compressed)
+            except Exception:
+                return None
+
+        if not self._v2_index:
+            return raw
+
+        hdr = decode_merged_block_header(raw)
+        cell_index = entry.get("cell_index", 0)
+        offsets = hdr["cell_offsets"]
+        if cell_index >= len(offsets):
+            return None
+        start = hdr["record_data_offset"] + offsets[cell_index][1]
+        if cell_index + 1 < len(offsets):
+            return raw[start : hdr["record_data_offset"] + offsets[cell_index + 1][1]]
+        return raw[start:]  # last cell in the block runs to the end
+
+    def get_in_cell(self, cell: int | str) -> list:
+        cell_int = int(cell, 16) if isinstance(cell, str) else cell
+        raw = self._cell_bytes(cell_int)
+        return self.decode_records(raw) if raw else []
+
+    def get_in_bounds(self, min_lat, min_lon, max_lat, max_lon, limit: int = 1000) -> list:
+        import h3
+
+        try:
+            cells = h3.polygon_to_cells(
+                h3.LatLngPoly(
+                    [
+                        (min_lat, min_lon),
+                        (min_lat, max_lon),
+                        (max_lat, max_lon),
+                        (max_lat, min_lon),
+                    ]
+                ),
+                7,
+            )
+        except Exception:
+            # A box smaller than one cell polygon-fills to nothing; fall back to
+            # the cells of its corners so a tight bbox still returns something.
+            cells = {
+                h3.latlng_to_cell(la, lo, 7)
+                for la in (min_lat, max_lat)
+                for lo in (min_lon, max_lon)
+            }
+        out = []
+        for cell in cells:
+            for rec in self.get_in_cell(cell):
+                lat = getattr(rec, "lat", None)
+                lon = getattr(rec, "lon", None)
+                if lat is not None and lon is not None:
+                    if not (min_lat <= lat <= max_lat and min_lon <= lon <= max_lon):
+                        continue
+                out.append(rec)
+                if len(out) >= limit:
+                    return out
+        return out

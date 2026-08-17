@@ -457,14 +457,36 @@ their bbox in the PTLR header at offset 84; files built before that field read
 all-zero and are reported as bounds-unknown, which means every client consults
 them on every query. Rebuild an old roads file to fix that.
 
+### Reading roads, trails and EV
+
+All three are readable now; they were not before.
+
+`RoadsReader.open` dispatches on the magic and returns a `PtlrRoadsReader` for
+PTLR files, which is every roads file built since the format changed. PTLR
+carries **no spatial index**, so one is built in memory on first query by
+walking a band and bucketing each road by the 0.01-degree cell of its first
+vertex. Costs for Japan's 10.5M roads:
+
+| | |
+| --- | --- |
+| open | ~1 MB, decodes nothing |
+| first query | ~19 s, ~340 MB — builds the index |
+| later queries | ~100 ms |
+
+Queries use the Z05 band (every road, simplified to 200 m) rather than Z07:
+the extra vertices do not change which road is nearest, and Z07 is nearly
+twice the bytes. A road is bucketed by where it *starts*, so raise `rings` to
+find a long way whose geometry begins far outside the searched cells.
+
+`TrailsReader` (PTILESH) and `EvReader` (PTILESE) are ordinary merged-block
+readers, built on `MergedBlockReader` in `ptiles/reader.py` — use that base for
+any new layer rather than copying the v2 block-slicing plumbing again.
+
 ### Known gaps
 
-- **`ptiles/roads.py` cannot open PTLR at all** — not for Japan and not for the
-  US. Roads has been unreadable by the Python client since the format changed.
-- `trails` and `ev` have builders and published files but no reader in
-  `LAYER_CONFIG`, so no client can open them.
 - `build_business_name_index.py` tokenisation is untested on Japanese, which
   has no whitespace word breaks; prefix search there is suspect.
+- The Rust reader downstream still has no PTLR support; only the plan doc.
 
 ## Rust Reader & CLI (downstream repo)
 

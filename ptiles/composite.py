@@ -25,6 +25,8 @@ from ptiles.places import Place, PlacesReader
 from ptiles.rail import RailFeature, RailReader
 from ptiles.roads import NearestRoad, RoadsReader
 from ptiles.signals import Signal, SignalsReader
+from ptiles.trails import Trail, TrailsReader
+from ptiles.ev import Charger, EvReader
 from ptiles.water import WaterFeature, WaterReader
 
 logger = logging.getLogger("ptiles.composite")
@@ -80,6 +82,8 @@ class PointReport:
     """Subset aimed at this point — ptiles.visibility.Sighting, each carrying
     the assumptions it was judged under."""
     signals: list[Signal] = field(default_factory=list)
+    trails: list[Trail] = field(default_factory=list)
+    chargers: list[Charger] = field(default_factory=list)
     sun: object | None = None
     """ptiles.sun.SunPosition, when the admin layer supplied a timezone."""
     shade: object | None = None
@@ -100,6 +104,8 @@ class CorridorReport:
     places: list[Place] = field(default_factory=list)
     cameras: list[Camera] = field(default_factory=list)
     signals: list[Signal] = field(default_factory=list)
+    trails: list[Trail] = field(default_factory=list)
+    chargers: list[Charger] = field(default_factory=list)
 
 
 class Layer(Protocol):
@@ -422,6 +428,53 @@ class SignalLayer(_LayerBase):
         self._reader.close()
 
 
+class TrailLayer(_LayerBase):
+    def __init__(self, path, scope=None):
+        self._reader = TrailsReader.open(path)
+        self._scope = scope
+
+    def query_point(self, lat, lon, report, **kw):
+        try:
+            import h3
+
+            cell = int(h3.latlng_to_cell(lat, lon, 7), 16)
+            report.trails.extend(self._reader.get_in_cell(cell))
+        except Exception as e:
+            logger.warning("Trails query failed: %s", e)
+
+    def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
+        try:
+            report.trails.extend(self._reader.get_in_bounds(
+                min_lat, min_lon, max_lat, max_lon, limit=limit
+            ))
+        except Exception as e:
+            logger.warning("Corridor trails failed: %s", e)
+
+
+class EvLayer(_LayerBase):
+    def __init__(self, path, scope=None):
+        self._reader = EvReader.open(path)
+        self._scope = scope
+
+    def query_point(self, lat, lon, report, **kw):
+        try:
+            # Chargers are sparse, so a cell lookup usually returns nothing --
+            # widen to the surrounding degree-ish box the way places does.
+            report.chargers.extend(self._reader.get_in_bounds(
+                lat - 0.05, lon - 0.05, lat + 0.05, lon + 0.05, limit=20
+            ))
+        except Exception as e:
+            logger.warning("EV query failed: %s", e)
+
+    def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
+        try:
+            report.chargers.extend(self._reader.get_in_bounds(
+                min_lat, min_lon, max_lat, max_lon, limit=limit
+            ))
+        except Exception as e:
+            logger.warning("Corridor EV failed: %s", e)
+
+
 class BusinessLayer(_LayerBase):
     def __init__(self, path, scope=None):
         self._reader = BusinessReader.open(path)
@@ -462,6 +515,8 @@ LAYER_CONFIG: list[tuple[str, type, bool, bool]] = [
     ("rail", RailLayer, True, True),
     ("camera", CameraLayer, True, True),
     ("signals", SignalLayer, True, True),
+    ("trails", TrailLayer, True, True),
+    ("ev", EvLayer, True, True),
 ]
 
 # Layers published as one file for a whole country rather than per subdivision,
@@ -489,6 +544,8 @@ LAYER_FILE_ALIASES: dict[str, tuple[str, ...]] = {
     "places": ("places_v1", "places"),
     "parks": ("parks_v1", "parks"),
     "rail": ("rail_v1", "rail"),
+    "trails": ("trails_v1", "trails"),
+    "ev": ("ev_v1", "ev"),
 }
 
 

@@ -291,9 +291,19 @@ class RoadsReader:
         return self._index_cache is not None
 
     @classmethod
-    def open(cls, path: str | os.PathLike) -> "RoadsReader":
-        """Open a .roads.ptiles file."""
+    def open(cls, path: str | os.PathLike):
+        """Open a .roads.ptiles file.
+
+        Two containers ship under this name: the original H3-indexed PTILESR,
+        and PTLR, the three-zoom-band format every roads file has been built in
+        since. Dispatch on the magic rather than making callers know which they
+        have -- returns a PtlrRoadsReader for the latter.
+        """
         f = open(path, "rb")
+        magic = f.read(4)
+        f.seek(0)
+        if magic == b"PTLR":
+            return PtlrRoadsReader(f, str(path))
         return cls(f, str(path))
 
     @property
@@ -488,4 +498,301 @@ class RoadsReader:
 
     def close(self) -> None:
         """Close the underlying file."""
+        self._file.close()
+
+
+# ===========================================================================
+# PTLR — the three-zoom-band roads container
+# ===========================================================================
+
+# Reverse of scripts/build_roads.py ROAD_CLASS_INDEX. That map is many-to-one
+# (motorway and motorway_link both encode as 0), so this names the canonical
+# class per index; the link variant is not recoverable from the file.
+PTLR_ROAD_CLASSES = [
+    "motorway", "trunk", "primary", "secondary", "tertiary", "unclassified",
+    "residential", "service", "living_street", "track", "path", "pedestrian",
+    "steps", "construction", "rest_area", "services",
+]
+
+PTLR_BANDS = ("z04", "z05", "z07")
+_PTLR_BAND_HEADER = {"z04": 8, "z05": 24, "z07": 40}  # offset of each band's triple
+
+# Index bucket size in micro-degrees: 0.01 deg, roughly 1.1 km. Buckets are
+# small on purpose -- a point query decodes every road in the searched cells, so
+# 5 km buckets meant tens of thousands of roads per query in central Tokyo.
+_GRID = 1000
+
+
+class PtlrRoadsReader:
+    """Reader for PTLR roads files — three zoom bands, no spatial index.
+
+    PTLR drops the H3 index the other layers carry: it is three ZSTD frames of
+    concatenated road records, each frame a different simplification of the
+    same road set. Nothing could read it from Python before, for any region
+    including the US, so roads have been missing from the composite client
+    since the format changed.
+
+    With no index on disk, one is built in memory on first query by walking a
+    band once and bucketing each road by the 0.05-degree cell of its first
+    vertex. That walk is the expensive part -- it decodes every record's
+    geometry, which for Japan's 10.5M roads takes a while and is why it is
+    deferred until something actually asks.
+
+    Consequence worth knowing: a road is bucketed by where it *starts*, so a
+    long way whose first vertex lies outside the searched cells can be missed.
+    `rings` widens the search; the default reaches roads starting within ~2 km,
+    which is far outside any sane nearest-road radius but will not find a
+    motorway whose geometry begins 50 km away. Raise `rings` for that, at
+    proportional cost.
+
+    Band choice: queries use Z05 (every road, simplified to 200 m) rather than
+    Z07, since the extra vertices do not change which road is nearest at any
+    scale a point query cares about, and Z07 is nearly twice the bytes.
+    """
+
+    DEFAULT_BAND = "z05"
+
+    def __init__(self, f: io.BufferedReader, filepath: str):
+        self._file = f
+        self._filepath = filepath
+        f.seek(0)
+        head = f.read(HEADER_SIZE)
+        if head[:4] != b"PTLR":
+            raise ValueError(f"not a PTLR file: {filepath}")
+        self._format_version = head[4]
+
+        self._bands = {}
+        for name, off in _PTLR_BAND_HEADER.items():
+            band_off, comp, decomp = struct.unpack_from("<QII", head, off)
+            self._bands[name] = {"offset": band_off, "comp": comp, "decomp": decomp}
+
+        self._road_count = struct.unpack_from("<I", head, 56)[0]
+        if self._format_version >= 2:
+            self._dict_lens = struct.unpack_from("<III", head, 60)
+            counts = struct.unpack_from("<III", head, 72)
+            for name, count in zip(PTLR_BANDS, counts):
+                self._bands[name]["count"] = count
+            mnx, mny, mxx, mxy = struct.unpack_from("<iiii", head, 84)
+            self._bounds = None if (mnx, mny, mxx, mxy) == (0, 0, 0, 0) else (
+                mny / 100_000, mnx / 100_000, mxy / 100_000, mxx / 100_000
+            )
+        else:
+            # v1 recorded neither dictionary lengths nor bounds, so its frames
+            # cannot be decompressed at all -- the dictionaries are
+            # concatenated with no way to tell where one ends.
+            self._dict_lens = None
+            self._bounds = None
+
+        self._band_cache: dict[str, bytes] = {}
+        self._grid_cache: dict[str, dict] = {}
+
+    @classmethod
+    def open(cls, path: str | os.PathLike) -> "PtlrRoadsReader":
+        return cls(open(path, "rb"), str(path))
+
+    @property
+    def header(self) -> dict:
+        """Header shaped like the PTILES one, so callers can treat them alike."""
+        h = {
+            "magic": b"PTLR",
+            "version": self._format_version,
+            "feature_count": self._road_count,
+            "block_count": len(PTLR_BANDS),
+        }
+        if self._bounds:
+            h["min_lat"], h["min_lon"], h["max_lat"], h["max_lon"] = self._bounds
+        return h
+
+    @property
+    def index_loaded(self) -> bool:
+        return bool(self._grid_cache)
+
+    def _dict_for(self, band: str) -> bytes:
+        if not self._dict_lens:
+            raise ValueError(
+                f"{self._filepath}: PTLR v{self._format_version} does not record "
+                "dictionary lengths, so its frames cannot be decompressed. "
+                "Rebuild with scripts/build_roads.py."
+            )
+        start = HEADER_SIZE
+        for name, length in zip(PTLR_BANDS, self._dict_lens):
+            if name == band:
+                self._file.seek(start)
+                return self._file.read(length)
+            start += length
+        raise KeyError(band)
+
+    def band_bytes(self, band: str = DEFAULT_BAND) -> bytes:
+        """Decompressed records for one zoom band, cached."""
+        if band not in self._band_cache:
+            import zstandard as zstd
+
+            meta = self._bands[band]
+            self._file.seek(meta["offset"])
+            compressed = self._file.read(meta["comp"])
+            d = zstd.ZstdCompressionDict(self._dict_for(band))
+            raw = zstd.ZstdDecompressor(dict_data=d).decompress(
+                compressed, max_output_size=meta["decomp"]
+            )
+            self._band_cache[band] = raw
+        return self._band_cache[band]
+
+    def _decode_at(self, raw: bytes, pos: int, prev_osm_id: int):
+        """Decode one record. Returns (RoadSegment, next_pos, osm_id)."""
+        delta, consumed = decode_varint(raw, pos)
+        pos += consumed
+        osm_id = prev_osm_id + delta  # plain varint: PBF ways are id-ascending
+
+        (count,) = struct.unpack_from("<H", raw, pos)
+        pos += 2
+        lon, lat = struct.unpack_from("<ii", raw, pos)
+        pos += 8
+        coords = [(lon / 100_000, lat / 100_000)]
+        for _ in range(count - 1):
+            dlon, consumed = decode_varint(raw, pos)
+            pos += consumed
+            dlat, consumed = decode_varint(raw, pos)
+            pos += consumed
+            lon += zigzag_decode(dlon)
+            lat += zigzag_decode(dlat)
+            coords.append((lon / 100_000, lat / 100_000))
+
+        cls_idx = raw[pos]
+        pos += 1
+        flags = raw[pos]
+        pos += 1
+        name = ref = None
+        if flags & 0x01:
+            (n,) = struct.unpack_from("<H", raw, pos)
+            pos += 2
+            name = raw[pos : pos + n].decode("utf-8", "replace")
+            pos += n
+        if flags & 0x02:
+            (n,) = struct.unpack_from("<H", raw, pos)
+            pos += 2
+            ref = raw[pos : pos + n].decode("utf-8", "replace")
+            pos += n
+
+        road = RoadSegment(
+            osm_id=osm_id,
+            road_class=(
+                PTLR_ROAD_CLASSES[cls_idx] if cls_idx < len(PTLR_ROAD_CLASSES) else "unknown"
+            ),
+            coords=tuple(coords),
+            name=name,
+            ref_tag=ref,
+        )
+        return road, pos, osm_id
+
+    def _grid(self, band: str = DEFAULT_BAND) -> dict:
+        """Bucket every road by the 0.05-degree cell of its first vertex.
+
+        Built once per band, on demand. See the class docstring for why this
+        exists and what it costs.
+        """
+        if band in self._grid_cache:
+            return self._grid_cache[band]
+        raw = self.band_bytes(band)
+        from array import array as _array
+
+        grid: dict[tuple[int, int], "array"] = {}
+        pos = 0
+        prev = 0
+        n = len(raw)
+        while pos < n:
+            start = pos
+            try:
+                delta, consumed = decode_varint(raw, pos)
+                pos += consumed
+                prev += delta
+                (count,) = struct.unpack_from("<H", raw, pos)
+                pos += 2
+                lon, lat = struct.unpack_from("<ii", raw, pos)
+                pos += 8
+                for _ in range(2 * (count - 1)):  # skip the delta pairs
+                    _, consumed = decode_varint(raw, pos)
+                    pos += consumed
+                pos += 1  # road class
+                flags = raw[pos]
+                pos += 1
+                for bit in (0x01, 0x02):
+                    if flags & bit:
+                        (ln,) = struct.unpack_from("<H", raw, pos)
+                        pos += 2 + ln
+            except (IndexError, struct.error):
+                break
+            key = (lon // _GRID, lat // _GRID)
+            bucket = grid.get(key)
+            if bucket is None:
+                bucket = grid[key] = _array("q")
+            bucket.append(start)
+        self._grid_cache[band] = grid
+        logger.debug("%s: indexed %d cells from band %s", self._filepath, len(grid), band)
+        return grid
+
+    def _candidates(self, lat: float, lon: float, rings: int, band: str):
+        """Roads in the cells around a point, decoded."""
+        grid = self._grid(band)
+        raw = self.band_bytes(band)
+        gx, gy = int(lon * 100_000) // _GRID, int(lat * 100_000) // _GRID
+        for dx in range(-rings, rings + 1):
+            for dy in range(-rings, rings + 1):
+                for offset in grid.get((gx + dx, gy + dy), ()):
+                    try:
+                        road, _, _ = self._decode_at(raw, offset, 0)
+                    except (IndexError, struct.error):
+                        continue
+                    yield road
+
+    def nearest(self, lat: float, lon: float, *, radius_meters: float = 100,
+                profile: str | None = None, rings: int = 2,
+                band: str = DEFAULT_BAND) -> NearestRoad | None:
+        found = self.nearest_n(lat, lon, n=1, radius_meters=radius_meters,
+                               rings=rings, band=band)
+        return found[0] if found else None
+
+    def nearest_n(self, lat: float, lon: float, n: int = 5, *,
+                  radius_meters: float = 1000, profile: str | None = None,
+                  rings: int = 2, band: str = DEFAULT_BAND) -> list[NearestRoad]:
+        results: list[NearestRoad] = []
+        for road in self._candidates(lat, lon, rings, band):
+            best = None
+            for i in range(len(road.coords) - 1):
+                (x1, y1), (x2, y2) = road.coords[i], road.coords[i + 1]
+                dist, sx, sy, frac = point_to_segment_distance_meters(
+                    lon, lat, x1, y1, x2, y2
+                )
+                if best is None or dist < best[0]:
+                    best = (dist, sx, sy, frac, i)
+            if best is None or best[0] > radius_meters:
+                continue
+            dist, sx, sy, frac, idx = best
+            results.append(
+                NearestRoad(road=road, distance_meters=dist, snapped_lat=sy,
+                            snapped_lon=sx, segment_index=idx, along_fraction=frac)
+            )
+        results.sort(key=lambda r: r.distance_meters)
+        return results[:n]
+
+    def get_in_bounds(self, min_lat: float, min_lon: float, max_lat: float,
+                      max_lon: float, limit: int = 1000,
+                      band: str = DEFAULT_BAND) -> list[RoadSegment]:
+        grid = self._grid(band)
+        raw = self.band_bytes(band)
+        out: list[RoadSegment] = []
+        x0, x1 = int(min_lon * 100_000) // _GRID, int(max_lon * 100_000) // _GRID
+        y0, y1 = int(min_lat * 100_000) // _GRID, int(max_lat * 100_000) // _GRID
+        for gx in range(x0, x1 + 1):
+            for gy in range(y0, y1 + 1):
+                for offset in grid.get((gx, gy), ()):
+                    try:
+                        road, _, _ = self._decode_at(raw, offset, 0)
+                    except (IndexError, struct.error):
+                        continue
+                    out.append(road)
+                    if len(out) >= limit:
+                        return out
+        return out
+
+    def close(self) -> None:
         self._file.close()

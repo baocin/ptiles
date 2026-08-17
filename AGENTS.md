@@ -31,23 +31,31 @@ the downstream crate mirrors it in code.
 Six data source families feed the PTILES build pipeline. Every layer traces
 back to one of these.
 
-### 1. Geofabrik OSM State PBFs
+### 1. Geofabrik OSM PBFs
 
 All OSM-derived layers (roads, water, buildings, places, rail, parks) start
-from state-level OSM extracts.
+from Geofabrik extracts — per state in the US, per country or per region
+elsewhere. See **Non-US Regions** below for how non-US extracts are named,
+declared and built.
 
-**Location:** `/mnt/core/timeline-ptiles-cache/raw/` — 53 files, ~11 GB
-**Source URL:** https://download.geofabrik.de/north-america/us/
+**Location:** `/mnt/core/timeline-ptiles-cache/raw/` — 53 US files ~11 GB, plus
+the Japan country and 8 region extracts (~4.7 GB)
+**Source URL:** https://download.geofabrik.de/north-america/us/ (US),
+https://download.geofabrik.de/asia/japan/ (Japan regions)
 **Format:** `.osm.pbf` (Protocolbuffer Binary Format, zlib-compressed)
 **Tool:** `osmium` Python bindings (`import osmium`, requires `locations=True`)
 **Update frequency:** Daily (Geofabrik rebuilds every 24h)
 **License:** ODbL (Open Database License) — attribution required
 
-State name convention: lowercase-hyphenated
+Extract name convention: lowercase-hyphenated, matching Geofabrik
 
 ```
 tennessee-latest.osm.pbf   north-carolina-latest.osm.pbf   new-york-latest.osm.pbf
+japan-latest.osm.pbf       kanto-latest.osm.pbf            kyushu-latest.osm.pbf
 ```
+
+Do not hardcode this mapping in a builder — `states.py:pbf_path()` resolves a
+scope to its extract across every cache directory and both naming conventions.
 
 ```bash
 # Download single state
@@ -250,6 +258,172 @@ uv run --with geopandas --with h3 --with numpy --with zstandard --with shapely \
 ```bash
 bash scripts/run_us_build.sh
 ```
+
+## Non-US Regions
+
+The pipeline is not US-only. Japan is built and published; anything Geofabrik
+ships an extract for can follow the same path. What differs from the US case is
+mostly naming and granularity.
+
+### Scopes
+
+A *scope* is the prefix of a `.ptiles` filename — the area one file covers.
+
+| Scope       | Means                    | Example file                       |
+| ----------- | ------------------------ | ---------------------------------- |
+| `TN`        | a US state               | `TN.buildings_v9.ptiles`           |
+| `US`        | the whole US             | `US.admin.ptiles`                  |
+| `JP`        | a whole country          | `JP.places_v1.ptiles`              |
+| `JP-KANTO`  | a subdivision of one     | `JP-KANTO.buildings_v9.ptiles`     |
+
+A bare two-letter scope is ambiguous by itself — `TN` is a state, `JP` is a
+country — so `ptiles/scopes.py` resolves it against the 51 US abbreviations,
+which own the unprefixed namespace because they were published first. The
+consequence: **a country whose ISO code collides with a state abbreviation
+(`DE`, `CA`, `IN`, `LA`, `MO`, `MD`, `MT`, `NE`, `PA`, `SC`) cannot use a bare
+scope** and must be published by subdivision, e.g. `DE-BY`. `country_of("DE")`
+returns `US`, deliberately.
+
+`ptiles/scopes.py` is the single definition of this and of the published
+layout; the manifest writer, the uploader and both clients all import it rather
+than reimplementing the rule.
+
+### Declaring a region
+
+Regions live in `scripts/states.py`. Non-US entries go in `NON_US`, and
+`REGIONS = STATES + NON_US`:
+
+```python
+State("", "JP-KANTO", "Kanto", 134.04, 18.62, 155.61, 37.16, "kanto"),
+#      ^fips  ^scope   ^name   ^bbox (min_lon, min_lat, max_lon, max_lat)  ^Geofabrik basename
+```
+
+They are kept **out of `STATES` on purpose**: every builder's `--all` iterates
+`STATES`, and a country-sized extract silently joining a 51-state run would be
+a nasty surprise. Reach them explicitly with `--states JP-KANTO`.
+
+**Derive bboxes from the extract's own PBF header — never by hand or from one
+layer's extent.** Geofabrik's `kanto` reaches Minamitorishima at 155.6E and
+`kyushu` reaches Yonaguni at 122.2E; a mainland-shaped guess clips them, and a
+box fitted to the road network clips Ogasawara, which has no roads but does
+have buildings:
+
+```bash
+uv run --with osmium python -c "
+import osmium
+b = osmium.io.Reader('/mnt/core/timeline-ptiles-cache/raw/kanto-latest.osm.pbf').header().box()
+print(b.bottom_left.lon, b.bottom_left.lat, b.top_right.lon, b.top_right.lat)"
+```
+
+Extracts are located by `states.py:pbf_path(region, prefer=PBF_DIR)`, which
+searches the three cache directories and both naming conventions
+(`{name}.osm.pbf` and `{name}-latest.osm.pbf`). Pass `prefer` — those
+directories hold different vintages, and a builder that has always read one of
+them must keep reading it or its output silently changes snapshot.
+
+### Granularity varies per layer
+
+The US is uniform: one file per state per layer. Other countries need not be.
+Japan's buildings are **eight regional files** because 29.5M buildings will not
+fit one build (a single-file attempt OOMs; see the memory note below), while
+its places, water, rail, parks and EV are one country-wide file each.
+
+Geofabrik splits Japan into 8 regions, not the 47 prefectures:
+`hokkaido tohoku kanto chubu kansai chugoku shikoku kyushu`.
+
+Two consequences:
+
+- **Region extracts overlap at their seams.** Summing buildings across the 8
+  regions gives 29,476,617 against 29,457,618 counted on the whole-country
+  extract — 0.06% duplication. That is expected, and matches how the Geofabrik
+  US state extracts behave.
+- **A client may hold several files for one layer**, so it must pick among
+  them by bounds rather than assume one. This is a correctness matter, not just
+  speed: a region that covers a point but holds no feature there must not
+  overwrite a hit from a neighbouring region.
+
+### Building Japan
+
+```bash
+# Country-wide layers (one file each)
+uv run --with osmium --with h3 --with zstandard --with shapely \
+    python scripts/build_places.py --states JP        # also parks, rail, trails, ev
+uv run --with osmium --with h3 --with zstandard --with shapely \
+    python scripts/build_water.py --source pbf --states JP
+uv run --with osmium --with h3 --with zstandard --with shapely \
+    python scripts/build_points.py --states JP        # signals + cameras
+
+# Roads: takes a raw PBF path, no region table needed
+uv run --with osmium --with h3 --with zstandard --with shapely \
+    python scripts/build_roads.py \
+    /mnt/core/timeline-ptiles-cache/raw/japan-latest.osm.pbf \
+    /mnt/core/kino/ptiles/data/JP.roads.ptiles
+
+# Buildings: per region, memory-capped so a runaway fails fast
+for R in HOKKAIDO TOHOKU KANTO CHUBU KANSAI CHUGOKU SHIKOKU KYUSHU; do
+  systemd-run --user --scope -p MemoryMax=10G -p MemorySwapMax=0 \
+    uv run --with osmium --with h3 --with zstandard --with shapely \
+    python scripts/build_state_v8.py JP-$R
+done
+```
+
+**Memory.** Extraction holds every feature in RAM. Country-scale extracts need
+the compact representation (`array('i')` of interleaved micro-degrees, ~8 bytes
+per vertex against ~80 for a Python float tuple) that `build_roads.py` and
+`build_state_v8.py` now use. Japan roads peaks at ~9 GB with it and OOMed at
+14 GB without. Cap large runs with `systemd-run --scope -p MemoryMax=`, so a
+runaway dies instead of pushing the box into zram — there is a resident LLM on
+GPU 1 that must not get paged out.
+
+### What is still US-only
+
+| Layer          | Blocker                                    |
+| -------------- | ------------------------------------------ |
+| `admin`        | Census TIGER shapefiles                    |
+| `address`      | NAD / OpenAddresses US shards              |
+| `us_highways`  | US route-shield semantics; `build_roads` already covers other countries' `highway=*` |
+
+Substitutes exist (OSM `admin_level` relations or GADM for admin; OSM `addr:*`
+for addresses) but are not wired up.
+
+### Reading and publishing
+
+Clients take a scope or a country:
+
+```python
+PtilesClient.open_scope("JP-KANTO", data_dir)    # one scope
+PtilesClient.open_country("JP", data_dir)        # every scope of a country
+PtilesClient.from_manifest(manifest, data_dir, country="JP")
+```
+
+`open_country` uses a `manifest.json` beside the data when present and falls
+back to probing filenames when absent — a partial download has no manifest. A
+manifest that is present but unparseable raises rather than falling back, since
+quietly probing would hide a corrupt publish. The TypeScript client mirrors all
+of this (`openScope`, `openCountry`, `fromManifest`).
+
+For the published layout (US at the snapshot root, other countries in a country
+directory) see the R2 Upload section below and the README.
+
+### Adding a new country
+
+1. Download the extract(s) into `/mnt/core/timeline-ptiles-cache/raw/`.
+2. Read each bbox from its PBF header and add rows to `NON_US` in `states.py`.
+3. Check the ISO code does not collide with a US state abbreviation; if it
+   does, use subdivision scopes only.
+4. Build the country-wide layers first; split a layer by subdivision only when
+   it will not fit one build.
+5. `python scripts/publish_snapshot.py <build_dir> <date> <source> --dry-run`
+   and check the keys before uploading.
+
+### Known gaps
+
+- **`ptiles/roads.py` cannot open PTLR at all** — not for Japan and not for the
+  US. Roads has been unreadable by the Python client since the format changed.
+- `trails` and `ev` have builders and published files but no reader in
+  `LAYER_CONFIG`, so no client can open them.
+- `build_business_name_index.py` tokenisation is untested on Japanese, which
+  has no whitespace word breaks; prefix search there is suspect.
 
 ## Rust Reader & CLI (downstream repo)
 

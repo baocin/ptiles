@@ -271,6 +271,57 @@ def decode_business_record_v4(
     return record, pos - start_pos
 
 
+# Magic of the name-scan section: every folded name in one blob.
+NAME_SCAN_MAGIC = b"PTNS"
+NAME_SCAN_VERSION = 1
+
+# zstd level for the scan section.
+#
+# 12 rather than 19 on purpose. 19 is 0.4 MB smaller over Tennessee and
+# *slower* to decompress -- 35 ms against 25 -- because the larger window costs
+# more to replay than it saves in bytes, and this section is read whole every
+# time it is used.
+NAME_SCAN_LEVEL = 12
+
+
+def name_scan_section(records: list[dict]) -> bytes:
+    """Every name, folded, in one blob, with positions alongside.
+
+    The buckets in this same file answer a prefix query by reading one block of
+    28. They cannot answer a substring one: they are keyed by the first letter
+    of the *name*, so `affle` looks in `a` while `Waffle House` sits in `w`.
+    Reading all 28 makes it complete and costs about a second, because each
+    block holds whole records and 829,528 of them are decoded to look at their
+    names.
+
+    Names alone, already folded, are 18 MB raw and 4.8 MB compressed for
+    Tennessee -- against 24 MB for the bucket index -- and a substring search
+    over them is a byte match needing no normalisation: 25 ms to decompress and
+    7 ms to scan.
+
+    Layout is documented in `core/src/name_scan.rs`, which reads it.
+    """
+    import struct
+    import zstandard as zstd
+
+    names = "\n".join(_fold_name(r["name"] or "") for r in records).encode("utf-8")
+    coords = bytearray()
+    for r in records:
+        coords.extend(struct.pack("<ii", r["lat_micro"], r["lon_micro"]))
+
+    compressor = zstd.ZstdCompressor(level=NAME_SCAN_LEVEL)
+    coords_z = compressor.compress(bytes(coords))
+    names_z = compressor.compress(names)
+
+    out = bytearray(NAME_SCAN_MAGIC)
+    out.append(NAME_SCAN_VERSION)
+    out.extend(struct.pack("<I", len(records)))
+    out.extend(struct.pack("<I", len(coords_z)))
+    out.extend(coords_z)
+    out.extend(names_z)
+    return bytes(out)
+
+
 def encode_name_record(record: dict, uid: int) -> bytes:
     """Encode a business record in the name index format (subset of fields)."""
     buf = bytearray()

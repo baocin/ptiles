@@ -110,19 +110,40 @@ class PointLayerReader:
             f.seek(self._header["aux_offset"])
             self._coarse = parse_coarse_index(f.read(aux_len))
 
-        f.seek(self._header["dict_offset"])
-        self._dict_data = f.read(self._header["dict_length"])
-
-        f.seek(self._header["index_offset"])
-        index_bytes = f.read(self._header["index_length"])
-        self._index, stride = read_index_auto(index_bytes)
-        if stride != INDEX_ENTRY_SIZE_V2:
-            logger.warning(
-                "%s: index stride %d, expected %d — this layer should use "
-                "wide entries", filepath, stride, INDEX_ENTRY_SIZE_V2,
-            )
+        # Dictionary and index are read on first use, not here. See
+        # ptiles/reader.py: the index is ~1 KB of Python object per block, and a
+        # multi-country client opens far more files than it queries. The stride
+        # warning below moves with it, so it is emitted on first query rather
+        # than at open.
+        self._index_cache = None
+        self._dict_cache = None
         self._raw_block_cache: dict[int, bytes] = {}
         self._raw_block_cache_max = 64
+
+    @property
+    def _index(self):
+        """Spatial index, decoded on first use -- see __init__."""
+        if self._index_cache is None:
+            self._file.seek(self._header["index_offset"])
+            raw = self._file.read(self._header["index_length"])
+            self._index_cache, stride = read_index_auto(raw)
+            if stride != INDEX_ENTRY_SIZE_V2:
+                logger.warning(
+                    "%s: index stride %d, expected %d — this layer should use "
+                    "wide entries", self._filepath, stride, INDEX_ENTRY_SIZE_V2,
+                )
+        return self._index_cache
+
+    @property
+    def _dict_data(self):
+        if self._dict_cache is None:
+            self._file.seek(self._header["dict_offset"])
+            self._dict_cache = self._file.read(self._header["dict_length"])
+        return self._dict_cache
+
+    @property
+    def index_loaded(self):
+        return self._index_cache is not None
 
     @classmethod
     def open(cls, path: str | os.PathLike):

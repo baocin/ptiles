@@ -13,7 +13,8 @@ File layout (256-byte header + 3 ZSTD frames):
           + road_count(4)                          @56, == z07_count
           + z04_dict_len(4) + z05_dict_len(4) + z07_dict_len(4)   @60
           + z04_count(4) + z05_count(4) + z07_count(4)            @72
-          + pad(172)
+          + min_lon(4) + min_lat(4) + max_lon(4) + max_lat(4)     @84, micro-deg
+          + pad(156)
   Band dictionaries are concatenated at offset 256 in Z04, Z05, Z07 order;
   split them using the three dict_len fields.
   Z04 frame (res 4, zoom 5-9): highways only, epsilon=500m
@@ -222,6 +223,25 @@ def simplify_coords(coords, epsilon):
 # ===========================================================================
 
 
+def roads_bounds(roads):
+    """(min_lon, min_lat, max_lon, max_lat) in micro-degrees over every vertex.
+
+    PTLR has no bbox field, so the manifest had to report bounds as unknown and
+    every client consulted every roads file on every query. Computing it here is
+    free -- the coordinates are already in memory.
+    """
+    mnx = mny = 2**31 - 1
+    mxx = mxy = -(2**31)
+    for _, ring, *_ in roads:
+        for i in range(0, len(ring), 2):
+            lon, lat = ring[i], ring[i + 1]
+            if lon < mnx: mnx = lon
+            if lon > mxx: mxx = lon
+            if lat < mny: mny = lat
+            if lat > mxy: mxy = lat
+    return (mnx, mny, mxx, mxy) if mxx >= mnx else (0, 0, 0, 0)
+
+
 def build_zoom_band(roads, epsilon, max_road_class, dict_data, level):
     """Encode all (filtered + simplified) roads for one zoom band."""
     buf = bytearray()
@@ -292,6 +312,7 @@ def write_ptiles(
     z07_decomp,
     z07_count,
     band_dicts,
+    bounds,
 ):
     """Write 256-byte header + 3 ZSTD frames."""
     # Layout
@@ -329,6 +350,10 @@ def write_ptiles(
         struct.pack_into("<III", hdr, 60, *(len(d) for d in band_dicts))
         # Per-band road counts (each band filters differently)
         struct.pack_into("<III", hdr, 72, z04_count, z05_count, z07_count)
+        # Bounding box in micro-degrees. All-zero means "not recorded" -- that
+        # is how a v2 file written before this field reads, and no real region
+        # is exactly 0/0/0/0.
+        struct.pack_into("<iiii", hdr, 84, *bounds)
         f.write(hdr)
 
         # Band dictionaries
@@ -396,6 +421,7 @@ def main():
         z07_decomp,
         z07_count,
         [d04, d05, d07],
+        roads_bounds(roads),
     )
 
     elapsed = time.time() - t0

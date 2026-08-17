@@ -2,7 +2,7 @@ import { describe, test, expect } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { PtilesClient, countryOf } from '../src/composite.js';
+import { PtilesClient, countryOf, collidesWithUsState } from '../src/composite.js';
 
 describe('scope naming', () => {
   test('a bare two-letter scope is a US state, a hyphenated one names its country', () => {
@@ -17,8 +17,17 @@ describe('scope naming', () => {
     expect(countryOf('DE-BY')).toBe('DE');
   });
 
+  test('alpha-3 names a country whose alpha-2 is taken by a US state', () => {
+    expect(countryOf('CAN')).toBe('CAN');
+    expect(countryOf('DEU')).toBe('DEU');
+    expect(countryOf('CAN-ON')).toBe('CAN');
+    expect(collidesWithUsState('CA')).toBe(true);
+    expect(collidesWithUsState('JP')).toBe(false);
+  });
+
   test('malformed scopes are rejected rather than guessed', () => {
-    for (const bad of ['', 'jp', 'JPN', 'JP_KANTO']) {
+    // 'JPN' is valid now: three letters is the ISO alpha-3 form.
+    for (const bad of ['', 'jp', 'JAPN', 'JP_KANTO']) {
       expect(() => countryOf(bad)).toThrow();
     }
   });

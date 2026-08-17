@@ -28,8 +28,10 @@ import re
 
 US = "US"
 
-# A scope is a country/state code, optionally followed by a subdivision.
-SCOPE_RE = re.compile(r"^(?P<head>[A-Z]{2})(?:-(?P<sub>[A-Z0-9]+))?$")
+# A scope is a country/state code, optionally followed by a subdivision. The
+# head may be two or three letters: ISO alpha-3 exists precisely so a country
+# whose alpha-2 is taken can still be named (see collides_with_us_state).
+SCOPE_RE = re.compile(r"^(?P<head>[A-Z]{2,3})(?:-(?P<sub>[A-Z0-9]+))?$")
 
 # A bare two-letter scope is ambiguous on its own: `TN` is a US state, `JP` is a
 # country. The US set was published first and owns the unprefixed namespace, so
@@ -39,17 +41,29 @@ US_STATES = frozenset(
     "MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY".split()
 )
 
-# ISO country codes that collide with a US state abbreviation. Publishing one of
-# these as a bare scope would silently read as the US state, so it is refused --
-# such a country must be scoped by subdivision (e.g. `DE-BY`) instead.
-COLLIDING_COUNTRIES = frozenset("DE CA IN LA MO MD MT NE PA SC".split()) & US_STATES
+
+def collides_with_us_state(alpha2: str) -> bool:
+    """Whether a country's ISO alpha-2 code is already a US state abbreviation.
+
+    26 real countries collide -- CA is Canada and California, TN is Tunisia and
+    Tennessee, DE is Germany and Delaware, and so on. Such a country cannot use
+    a bare scope, because `CA.places_v1.ptiles` for Canada is the same filename
+    at the same published path as California's. Use the alpha-3 code (`CAN`) or
+    subdivision scopes (`CA-ON`) instead.
+
+    This is a test against the state list rather than a list of countries: an
+    enumerated collision list is exactly the kind of thing that goes stale, and
+    the first version of it here was wrong -- it named 10 of the 26.
+    """
+    return alpha2.upper() in US_STATES
 
 
 def country_of(scope: str) -> str:
     """Country a scope belongs to.
 
     `TN` -> `US` (a state), `US` -> `US`, `JP` -> `JP` (a country),
-    `JP-KANTO` -> `JP` (a subdivision names its country first).
+    `JP-KANTO` -> `JP` (a subdivision names its country first),
+    `CAN` -> `CAN` (alpha-3, used where alpha-2 is taken by a state).
     """
     m = SCOPE_RE.match(scope)
     if not m:
@@ -58,7 +72,24 @@ def country_of(scope: str) -> str:
     if sub:
         # Explicitly qualified, so no ambiguity even for a colliding code.
         return head
+    if len(head) == 3:
+        # Alpha-3 is never a US state abbreviation, so it is always a country.
+        return head
     return US if head in US_STATES or head == US else head
+
+
+def check_country_scope(scope: str) -> None:
+    """Raise if `scope` cannot name a non-US region unambiguously.
+
+    Called when declaring a region, so a colliding code is caught at the table
+    rather than by silently overwriting a US state's file in the bucket.
+    """
+    country = country_of(scope)
+    if country == US:
+        raise ValueError(
+            f"scope {scope!r} resolves to the US: {scope.split('-')[0]!r} is a US "
+            f"state abbreviation. Use the ISO alpha-3 code or a subdivision scope."
+        )
 
 
 def is_us(scope: str) -> bool:
@@ -89,12 +120,26 @@ def demo() -> None:
     assert is_us("TN") and not is_us("JP-KANTO")
 
     # A colliding code stays with the US when bare, and follows its own country
-    # once qualified -- which is why such a country must use subdivisions.
+    # once qualified or written as alpha-3.
     assert country_of("DE") == "US"  # Delaware, not Germany
     assert country_of("DE-BY") == "DE"  # Bavaria
-    assert "DE" in COLLIDING_COUNTRIES
+    assert country_of("DEU") == "DEU"  # Germany, unambiguously
+    assert country_of("CAN-ON") == "CAN"
+    assert collides_with_us_state("CA") and collides_with_us_state("TN")
+    assert not collides_with_us_state("JP")
 
-    for bad in ("", "j", "jp", "JPN", "JP_KANTO", "JP-kanto", "TN.roads"):
+    # Declaring a region under a colliding bare code is refused outright.
+    for bad in ("CA", "TN", "DE"):
+        try:
+            check_country_scope(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{bad!r} should be refused as a country scope")
+    for good in ("JP", "JP-KANTO", "CAN", "CA-ON"):
+        check_country_scope(good)
+
+    for bad in ("", "j", "jp", "JAPN", "JP_KANTO", "JP-kanto", "TN.roads"):
         try:
             country_of(bad)
         except ValueError:

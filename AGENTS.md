@@ -269,20 +269,29 @@ mostly naming and granularity.
 
 A *scope* is the prefix of a `.ptiles` filename — the area one file covers.
 
-| Scope       | Means                    | Example file                       |
-| ----------- | ------------------------ | ---------------------------------- |
-| `TN`        | a US state               | `TN.buildings_v9.ptiles`           |
-| `US`        | the whole US             | `US.admin.ptiles`                  |
-| `JP`        | a whole country          | `JP.places_v1.ptiles`              |
-| `JP-KANTO`  | a subdivision of one     | `JP-KANTO.buildings_v9.ptiles`     |
+| Scope       | Means                          | Example file                   |
+| ----------- | ------------------------------ | ------------------------------ |
+| `TN`        | a US state                     | `TN.buildings_v9.ptiles`       |
+| `US`        | the whole US                   | `US.admin.ptiles`              |
+| `JP`        | a whole country (alpha-2)      | `JP.places_v1.ptiles`          |
+| `CAN`       | a whole country (alpha-3)      | `CAN.places_v1.ptiles`         |
+| `JP-KANTO`  | a subdivision of one           | `JP-KANTO.buildings_v9.ptiles` |
 
-A bare two-letter scope is ambiguous by itself — `TN` is a state, `JP` is a
-country — so `ptiles/scopes.py` resolves it against the 51 US abbreviations,
-which own the unprefixed namespace because they were published first. The
-consequence: **a country whose ISO code collides with a state abbreviation
-(`DE`, `CA`, `IN`, `LA`, `MO`, `MD`, `MT`, `NE`, `PA`, `SC`) cannot use a bare
-scope** and must be published by subdivision, e.g. `DE-BY`. `country_of("DE")`
-returns `US`, deliberately.
+A bare two-letter scope is ambiguous by itself — `TN` is Tennessee *and*
+Tunisia — so `ptiles/scopes.py` resolves it against the 51 US abbreviations,
+which own the unprefixed namespace because they were published first.
+`country_of("DE")` returns `US`: Delaware, not Germany.
+
+**26 ISO country codes collide with a US state abbreviation**: AL AR AZ CA CO DE
+GA ID IL IN KY LA MA MD ME MN MO MS MT NC NE PA SC SD TN VA. Such a country must
+use its **ISO alpha-3 code** (`CAN`, `DEU`, `TUN`) or subdivision scopes
+(`CA-ON`). Three letters can never be a state abbreviation, so alpha-3 is
+always unambiguous.
+
+This is enforced, not just documented: `states.py` refuses a `NON_US` row whose
+scope resolves back to the US, at import. Without that guard Canada's
+`CA.places_v1.ptiles` would publish to exactly California's key and overwrite it
+in the bucket, with no error at any step.
 
 `ptiles/scopes.py` is the single definition of this and of the published
 layout; the manifest writer, the uploader and both clients all import it rather
@@ -409,12 +418,32 @@ directory) see the R2 Upload section below and the README.
 
 1. Download the extract(s) into `/mnt/core/timeline-ptiles-cache/raw/`.
 2. Read each bbox from its PBF header and add rows to `NON_US` in `states.py`.
-3. Check the ISO code does not collide with a US state abbreviation; if it
-   does, use subdivision scopes only.
+   If the region crosses the antimeridian, give it true wrapped bounds
+   (`min_lon > max_lon`) — both the client and the build filter handle that.
+3. If the ISO alpha-2 collides with a US state (see the 26 above), use the
+   alpha-3 code. `states.py` will refuse the row otherwise.
 4. Build the country-wide layers first; split a layer by subdivision only when
    it will not fit one build.
 5. `python scripts/publish_snapshot.py <build_dir> <date> <source> --dry-run`
    and check the keys before uploading.
+
+Layer versions are tracked per country, so a country rebuilt at
+`buildings_v10` publishes alongside others still at `v9`. Two versions of one
+layer *within* a country is still fatal — that filename is unpredictable.
+
+### Cost of holding many countries
+
+Readers open lazily: the header is read at open, the spatial index, zstd
+dictionary and water's large-body table only on first query. Opening all of
+Japan costs ~12 MB rather than the ~190 MB it did when everything was eager,
+and a point query decodes the index of only the files whose bounds contain it
+(2 of 8 building files for Tokyo). This is what makes holding a dozen countries
+open practical, so keep new readers lazy — the pattern is in `ptiles/reader.py`.
+
+`points.py` is the exception to nothing: it is lazy too. Roads files record
+their bbox in the PTLR header at offset 84; files built before that field read
+all-zero and are reported as bounds-unknown, which means every client consults
+them on every query. Rebuild an old roads file to fix that.
 
 ### Known gaps
 

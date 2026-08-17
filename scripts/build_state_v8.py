@@ -64,6 +64,19 @@ def as_dict(b):
     return d
 
 
+def _lon_within(west: float, east: float, lon: float) -> bool:
+    """Longitude containment that survives the antimeridian.
+
+    A region crossing 180 has west > east, and the naive `west <= lon <= east`
+    is then false everywhere -- which here would silently drop every feature
+    rather than merely mis-filter. states.py gives Alaska the whole globe to
+    dodge this; with the wrap handled, a real bbox works.
+    """
+    if west <= east:
+        return west <= lon <= east
+    return lon >= west or lon <= east
+
+
 class BuildingHandler(osmium.SimpleHandler):
     def __init__(self, state_bbox):
         super().__init__()
@@ -85,7 +98,7 @@ class BuildingHandler(osmium.SimpleHandler):
                     continue
                 if not ring:
                     if not (
-                        self.min_lon <= lon <= self.max_lon
+                        _lon_within(self.min_lon, self.max_lon, lon)
                         and self.min_lat <= lat <= self.max_lat
                     ):
                         return

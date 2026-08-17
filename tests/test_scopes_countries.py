@@ -18,7 +18,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from ptiles.scopes import COLLIDING_COUNTRIES, country_of, publish_relpath  # noqa: E402
+from ptiles.scopes import collides_with_us_state, country_of, publish_relpath  # noqa: E402
 
 SNAPSHOT = Path("/mnt/core/kino/ptiles/data")
 JP_BUILDINGS = SNAPSHOT / "v4/states/JP-KANTO.buildings_v9.ptiles"
@@ -35,13 +35,20 @@ def test_country_of():
 
 
 def test_bare_state_code_beats_country_code():
-    """`DE` is Delaware here, because the US set owns the unprefixed namespace."""
+    """`DE` is Delaware here, because the US set owns the unprefixed namespace.
+
+    Germany must therefore be published as alpha-3 (`DEU`) or by subdivision
+    (`DE-BY`); see tests/test_scaling_fixes.py for the guard that enforces it.
+    """
     assert country_of("DE") == "US"
     assert country_of("DE-BY") == "DE"
-    assert "DE" in COLLIDING_COUNTRIES
+    assert country_of("DEU") == "DEU"
+    assert collides_with_us_state("DE")
 
 
-@pytest.mark.parametrize("bad", ["", "jp", "JPN", "JP_KANTO", "TN.roads"])
+# `JPN` is valid now -- three letters is the ISO alpha-3 form, used where a
+# country's alpha-2 is already a US state abbreviation.
+@pytest.mark.parametrize("bad", ["", "jp", "JAPN", "JP_KANTO", "TN.roads"])
 def test_malformed_scope_rejected(bad):
     with pytest.raises(ValueError):
         country_of(bad)

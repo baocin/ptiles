@@ -202,34 +202,67 @@ class WaterReader:
         self._header = read_header(f)
         self._version = self._header.get("version", 1)
 
-        # Read zstd dictionary
-        f.seek(self._header["dict_offset"])
-        self._dict_data = f.read(self._header["dict_length"])
+        # Dictionary and index are read on first use, not here: the index costs
+        # ~1 KB of Python object per block, and a multi-country client opens far
+        # more files than it queries. See ptiles/reader.py.
+        self._index_cache = None
+        self._dict_cache = None
+        self._relative_offsets_cache = None
 
-        # Read spatial index
-        f.seek(self._header["index_offset"])
-        index_bytes = f.read(self._header["index_length"])
-        self._index = read_index(index_bytes)
+        # The large water body table is read on first use as well. It carries
+        # full polygon geometry for coastlines and big lakes, which for Japan is
+        # 94 MB -- by far the largest thing any reader touches at open, and
+        # wasted entirely on a client that opens a country it never queries.
+        self._feature_table_cache = None
 
-        # Detect relative offsets
-        self._relative_offsets = True
-        if self._index:
-            first_off = self._index[0]["block_offset"]
-            self._relative_offsets = first_off < self._header["blocks_offset"]
 
-        # Read large water body feature table from aux section
-        self._feature_table: list[LargeWaterBody] = []
-        if self._header["aux_offset"] > 0 and self._header["aux_length"] > 0:
-            f.seek(self._header["aux_offset"])
-            aux_data = f.read(self._header["aux_length"])
-            try:
-                decompressed = zstd.ZstdDecompressor().decompress(aux_data)
-            except Exception:
-                decompressed = aux_data
-            try:
-                self._feature_table = parse_large_water_body_table(decompressed)
-            except Exception as e:
-                logger.warning("Failed to parse large water body table: %s", e)
+    @property
+    def _feature_table(self) -> list:
+        """Large water bodies, parsed on first use. See __init__."""
+        if self._feature_table_cache is None:
+            table: list[LargeWaterBody] = []
+            if self._header["aux_offset"] > 0 and self._header["aux_length"] > 0:
+                self._file.seek(self._header["aux_offset"])
+                aux_data = self._file.read(self._header["aux_length"])
+                try:
+                    decompressed = zstd.ZstdDecompressor().decompress(aux_data)
+                except Exception:
+                    decompressed = aux_data
+                try:
+                    table = parse_large_water_body_table(decompressed)
+                except Exception as e:
+                    logger.warning("Failed to parse large water body table: %s", e)
+            self._feature_table_cache = table
+        return self._feature_table_cache
+
+    @property
+    def _index(self):
+        """Spatial index, decoded on first use -- see ptiles/reader.py."""
+        if self._index_cache is None:
+            self._file.seek(self._header["index_offset"])
+            raw = self._file.read(self._header["index_length"])
+            self._index_cache = read_index(raw)
+        return self._index_cache
+
+    @property
+    def _dict_data(self):
+        if self._dict_cache is None:
+            self._file.seek(self._header["dict_offset"])
+            self._dict_cache = self._file.read(self._header["dict_length"])
+        return self._dict_cache
+
+    @property
+    def _relative_offsets(self):
+        if self._relative_offsets_cache is None:
+            idx = self._index
+            self._relative_offsets_cache = (
+                idx[0]["block_offset"] < self._header["blocks_offset"] if idx else True
+            )
+        return self._relative_offsets_cache
+
+    @property
+    def index_loaded(self):
+        return self._index_cache is not None
 
     @classmethod
     def open(cls, path: str | os.PathLike) -> "WaterReader":

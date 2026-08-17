@@ -42,10 +42,6 @@ class BlockFileReader:
         self._version = self._header["version"]
         self._v2_index = False
 
-        # Read zstd dictionary
-        f.seek(self._header["dict_offset"])
-        self._dict_data = f.read(self._header["dict_length"])
-
         # Detect v2 index format (38-byte entries) vs v1 (17-byte entries)
         bc = self._header.get("block_count", 0)
         idx_len = self._header["index_length"]
@@ -53,19 +49,14 @@ class BlockFileReader:
         if idx_len > est_v1 + bc * 5 and est_v1 > 0:
             self._v2_index = True
 
-        # Read spatial index
-        f.seek(self._header["index_offset"])
-        index_bytes = f.read(idx_len)
-        if self._v2_index:
-            self._index = decode_index_v2(index_bytes)
-        else:
-            self._index = read_index(index_bytes)
-
-        # Detect relative offsets
-        self._relative_offsets = True
-        if self._index:
-            first_off = self._index[0]["block_offset"]
-            self._relative_offsets = first_off < self._header["blocks_offset"]
+        # The dictionary and the spatial index are read on first use, not here.
+        # The index decodes to one dict per block -- ~1 KB of Python object per
+        # entry, so a file with 86k blocks costs ~98 MB just to open. A client
+        # holding many countries opens far more files than it queries, and the
+        # bounds test that decides which to query needs only the header.
+        self._index_cache = None
+        self._dict_cache = None
+        self._relative_offsets_cache = None
 
     @classmethod
     def open(cls, path: str | os.PathLike) -> "BlockFileReader":
@@ -76,6 +67,39 @@ class BlockFileReader:
     @property
     def header(self) -> dict:
         return self._header
+
+    @property
+    def _index(self) -> list:
+        """Spatial index, decoded on first use. See __init__ for why."""
+        if self._index_cache is None:
+            self._file.seek(self._header["index_offset"])
+            raw = self._file.read(self._header["index_length"])
+            self._index_cache = (
+                decode_index_v2(raw) if self._v2_index else read_index(raw)
+            )
+        return self._index_cache
+
+    @property
+    def _dict_data(self) -> bytes:
+        """Zstd dictionary, read on first use."""
+        if self._dict_cache is None:
+            self._file.seek(self._header["dict_offset"])
+            self._dict_cache = self._file.read(self._header["dict_length"])
+        return self._dict_cache
+
+    @property
+    def _relative_offsets(self) -> bool:
+        if self._relative_offsets_cache is None:
+            idx = self._index
+            self._relative_offsets_cache = (
+                idx[0]["block_offset"] < self._header["blocks_offset"] if idx else True
+            )
+        return self._relative_offsets_cache
+
+    @property
+    def index_loaded(self) -> bool:
+        """Whether the index has actually been decoded. For tests and metrics."""
+        return self._index_cache is not None
 
     def resolve_offset(self, offset: int) -> int:
         """Convert relative index offset to absolute file offset."""

@@ -115,6 +115,33 @@ NON_US: list[State] = [
 
 REGIONS: list[State] = STATES + NON_US
 
+
+def _check_non_us_scopes() -> None:
+    """Refuse a non-US region whose scope would resolve back to a US state.
+
+    26 ISO alpha-2 codes are also US state abbreviations -- CA is Canada and
+    California, TN is Tunisia and Tennessee. A bare `CA` row here would publish
+    Canada's country-wide files under exactly California's filenames, at the
+    same path, overwriting them in the bucket with no error anywhere. Catch it
+    at the table instead: use the alpha-3 code (`CAN`) or subdivisions (`CA-ON`).
+
+    Checked against STATES directly, so this module keeps its only dependency
+    being the standard library. ptiles.scopes.check_country_scope is the same
+    rule for library callers.
+    """
+    us_abbrs = {s.abbr for s in STATES}
+    for region in NON_US:
+        head = region.abbr.split("-")[0]
+        if len(head) == 2 and head in us_abbrs:
+            raise ValueError(
+                f"region {region.abbr!r} ({region.name}) collides with the US "
+                f"state {head!r}. Use the ISO alpha-3 code (e.g. 'CAN') or "
+                f"subdivision scopes (e.g. 'CA-ON')."
+            )
+
+
+_check_non_us_scopes()
+
 # Geofabrik extracts have accumulated in three directories with two naming
 # conventions. Search all of them rather than making every builder pick one.
 PBF_DIRS = [

@@ -36,6 +36,33 @@ logger = logging.getLogger("ptiles.composite")
 NEIGHBOUR_PAD_DEG = 0.05
 
 
+def lon_within(west: float, east: float, lon: float, pad: float = 0.0) -> bool:
+    """Whether `lon` falls in the range west..east, going eastward.
+
+    A box that crosses the antimeridian has west > east (Fiji is 177E..-179E).
+    Comparing `west <= lon <= east` on such a box is false for every longitude
+    on Earth, so the layer is skipped and the query returns nothing -- silently,
+    since an empty answer looks exactly like "no features here". Countries this
+    affects: Fiji, New Zealand's Chathams, Russia, Kiribati, and Alaska, whose
+    row in states.py sidesteps it today by claiming the whole globe.
+    """
+    if west <= east:
+        return west - pad <= lon <= east + pad
+    return lon >= west - pad or lon <= east + pad
+
+
+def lon_ranges_overlap(west: float, east: float, min_lon: float, max_lon: float) -> bool:
+    """Whether two longitude ranges overlap, either of which may wrap."""
+    a_wraps, b_wraps = west > east, min_lon > max_lon
+    if not a_wraps and not b_wraps:
+        return not (max_lon < west or min_lon > east)
+    if a_wraps and b_wraps:
+        return True  # both include the antimeridian, so they share it
+    if a_wraps:
+        return min_lon <= east or max_lon >= west
+    return west <= max_lon or east >= min_lon
+
+
 @dataclass
 class PointReport:
     building: Building | None = None
@@ -138,14 +165,16 @@ class _LayerBase:
         if b is None:
             return True
         s, w, n, e = b
-        return (s - pad) <= lat <= (n + pad) and (w - pad) <= lon <= (e + pad)
+        return (s - pad) <= lat <= (n + pad) and lon_within(w, e, lon, pad)
 
     def intersects(self, min_lat, min_lon, max_lat, max_lon):
         b = self.bounds
         if b is None:
             return True
         s, w, n, e = b
-        return not (max_lat < s or min_lat > n or max_lon < w or min_lon > e)
+        if max_lat < s or min_lat > n:
+            return False
+        return lon_ranges_overlap(w, e, min_lon, max_lon)
 
     def close(self):
         self._reader.close()
@@ -472,15 +501,21 @@ def _manifest_relpath(scope, layer, entry, meta) -> str | None:
     """
     from ptiles.scopes import publish_relpath
 
-    rel = (meta or {}).get("path")
+    meta = meta or {}
+    rel = meta.get("path")
     if rel:
         return rel
     pattern = entry.get("pattern")
-    if pattern:
+    # The scope's own version wins over the layer's: once countries can sit at
+    # different versions the layer-level one is null, and only the per-scope
+    # value says what this file is actually called.
+    version = meta.get("version", entry.get("version"))
+    if version:
+        filename = f"{scope}.{layer}_v{version}.ptiles"
+    elif pattern:
         filename = pattern.replace("{scope}", scope)
     else:
-        version = entry.get("version")
-        filename = f"{scope}.{layer}_v{version}.ptiles" if version else f"{scope}.{layer}.ptiles"
+        filename = f"{scope}.{layer}.ptiles"
     try:
         return publish_relpath(scope, filename)
     except ValueError:

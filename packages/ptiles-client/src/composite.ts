@@ -23,9 +23,14 @@ export interface Manifest {
   source: string;
   countries: Record<string, string[]>;
   layers: Record<string, {
+    /** Null when countries in this snapshot sit at different versions. */
     version: number | null;
-    pattern: string;
-    scopes: Record<string, { country: string; path: string; bounds: number[] | null }>;
+    pattern: string | null;
+    /** Version per country, e.g. { US: 9, FR: 10 }. */
+    versions?: Record<string, number | null>;
+    scopes: Record<string, {
+      country: string; path: string; bounds: number[] | null; version?: number | null;
+    }>;
   }>;
 }
 
@@ -48,11 +53,17 @@ const US_STATES = new Set(
 );
 
 export function countryOf(scope: string): string {
-  const m = /^([A-Z]{2})(?:-([A-Z0-9]+))?$/.exec(scope);
+  const m = /^([A-Z]{2,3})(?:-([A-Z0-9]+))?$/.exec(scope);
   if (!m) throw new Error(`not a scope: ${scope}`);
   const [, head, sub] = m;
-  if (sub) return head;
+  if (sub) return head;              // already qualified: JP-KANTO, CA-ON
+  if (head.length === 3) return head; // alpha-3 is never a US state abbreviation
   return US_STATES.has(head) || head === 'US' ? 'US' : head;
+}
+
+/** Whether a country's ISO alpha-2 is already a US state abbreviation. */
+export function collidesWithUsState(alpha2: string): boolean {
+  return US_STATES.has(alpha2.toUpperCase());
 }
 
 /** Where a file sits in a snapshot: US at the root, other countries in a dir. */
@@ -69,14 +80,18 @@ export function publishRelpath(scope: string, filename: string): string {
 export function manifestRelpath(
   scope: string,
   layer: string,
-  entry: { version?: number | null; pattern?: string },
-  meta?: { path?: string }
+  entry: { version?: number | null; pattern?: string | null },
+  meta?: { path?: string; version?: number | null }
 ): string | null {
   if (meta?.path) return meta.path;
-  const filename = entry?.pattern
-    ? entry.pattern.replace('{scope}', scope)
-    : entry?.version
-      ? `${scope}.${layer}_v${entry.version}.ptiles`
+  // The scope's own version wins over the layer's: once countries can sit at
+  // different versions the layer-level one is null, and only the per-scope
+  // value says what this file is actually called.
+  const version = meta?.version ?? entry?.version;
+  const filename = version
+    ? `${scope}.${layer}_v${version}.ptiles`
+    : entry?.pattern
+      ? entry.pattern.replace('{scope}', scope)
       : `${scope}.${layer}.ptiles`;
   try {
     return publishRelpath(scope, filename);
@@ -91,13 +106,25 @@ interface Held<T> {
   reader: T & { header: Header };
 }
 
+/**
+ * Whether `lon` falls in west..east going eastward.
+ * A box crossing the antimeridian has west > east (Fiji is 177E..-179E), and
+ * `west <= lon <= east` is then false for every longitude on Earth -- the file
+ * gets skipped and the query returns nothing, which looks identical to "no
+ * features here". Affects Fiji, NZ's Chathams, Russia, Kiribati, Alaska.
+ */
+export function lonWithin(west: number, east: number, lon: number, pad = 0): boolean {
+  if (west <= east) return lon >= west - pad && lon <= east + pad;
+  return lon >= west - pad || lon <= east + pad;
+}
+
 function covers(h: Header, lat: number, lon: number, pad = 0.05): boolean {
   // A file with no usable bbox (PTLR roads carry none) is always consulted.
   if (!h || typeof h.min_lat !== 'number') return true;
   if (h.min_lat === 0 && h.max_lat === 0) return true;
   return (
     lat >= h.min_lat - pad && lat <= h.max_lat + pad &&
-    lon >= h.min_lon - pad && lon <= h.max_lon + pad
+    lonWithin(h.min_lon, h.max_lon, lon, pad)
   );
 }
 

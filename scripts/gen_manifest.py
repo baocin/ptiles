@@ -47,15 +47,24 @@ def _describe_ptlr(path):
     far. Parse the real fields instead, and report bounds as null rather than
     inventing them.
     """
-    data = path.read_bytes()[:80]
+    with open(path, "rb") as f:
+        data = f.read(256)  # the whole PTLR header
     version = data[4]
     road_count = struct.unpack_from("<I", data, 56)[0]
+    # Bounds live at offset 84 in micro-degrees. All-zero means the file predates
+    # the field, in which case they are genuinely unknown and reported as null --
+    # no real region is exactly 0/0/0/0.
+    mnx, mny, mxx, mxy = struct.unpack_from("<iiii", data, 84)
+    bounds = None
+    if (mnx, mny, mxx, mxy) != (0, 0, 0, 0):
+        bounds = [round(mny / 1e5, 6), round(mnx / 1e5, 6),
+                  round(mxy / 1e5, 6), round(mxx / 1e5, 6)]
     out = {
         "format": "PTLR",
         "format_version": version,
         "features": road_count,
         "blocks": 3,  # the three zoom bands
-        "bounds": None,  # PTLR stores none; a client must not filter on it
+        "bounds": bounds,
     }
     if version < 2:
         # v1 wrote the Z04 count (motorway/trunk/primary only) into the total
@@ -114,15 +123,17 @@ def main():
             print(f"FATAL: unrecognised .ptiles name: {path.name}", file=sys.stderr)
             sys.exit(1)
         layer = m["layer"]
-        entry = layers.setdefault(
-            layer, {"version": int(m["ver"]) if m["ver"] else None, "scopes": {}}
-        )
-        if entry["version"] != (int(m["ver"]) if m["ver"] else None):
-            # Two versions of one layer in a single build would make the file
-            # name unpredictable from the manifest, which is the whole point.
-            print(f"FATAL: {layer} has mixed versions in this build", file=sys.stderr)
-            sys.exit(1)
-        entry["scopes"][m["scope"]] = describe(path, m["scope"])
+        entry = layers.setdefault(layer, {"scopes": {}, "_versions": {}})
+        scope = m["scope"]
+        meta = describe(path, scope)
+        # Version is recorded per scope and summarised per country. Requiring a
+        # single version per layer across the whole build was fine when a build
+        # meant "the US set"; once countries are rebuilt on their own schedules
+        # one country reaching buildings_v10 while another sits at v9 is normal,
+        # and used to abort the publish outright.
+        meta["version"] = int(m["ver"]) if m["ver"] else None
+        entry["scopes"][scope] = meta
+        entry["_versions"].setdefault(meta["country"], set()).add(meta["version"])
 
     # Layers carried forward from an earlier build, served by this snapshot but
     # not produced by it.
@@ -137,7 +148,7 @@ def main():
         if not src.is_dir():
             print(f"FATAL: --carry dir not found: {src}", file=sys.stderr)
             sys.exit(1)
-        entry = layers.setdefault(layer, {"version": int(ver), "scopes": {}})
+        entry = layers.setdefault(layer, {"scopes": {}, "_versions": {}})
         entry["carried_forward"] = True
         if note:
             entry["note"] = note
@@ -148,14 +159,35 @@ def main():
                 # the first dot, so a malformed name reached the manifest.
                 print(f"FATAL: unrecognised carried name: {f.name}", file=sys.stderr)
                 sys.exit(1)
-            entry["scopes"][cm["scope"]] = describe(f, cm["scope"])
+            meta = describe(f, cm["scope"])
+            meta["version"] = int(ver)
+            entry["scopes"][cm["scope"]] = meta
+            entry["_versions"].setdefault(meta["country"], set()).add(int(ver))
 
     for layer, entry in layers.items():
-        v = entry["version"]
-        # Kept for older clients. `pattern` cannot express the published layout
-        # (US at the snapshot root, other countries under a country directory),
-        # so a client that can should join each scope's own `path` instead.
-        entry["pattern"] = f"{{scope}}.{layer}_v{v}.ptiles" if v else f"{{scope}}.{layer}.ptiles"
+        per_country = entry.pop("_versions")
+        # One version per country. A country building a layer at two versions in
+        # one snapshot really is broken -- the filename would be unpredictable.
+        for c, versions in sorted(per_country.items()):
+            if len(versions) > 1:
+                print(
+                    f"FATAL: {layer} has versions {sorted(v or 0 for v in versions)} "
+                    f"within {c} in this build",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        entry["versions"] = {c: next(iter(v)) for c, v in sorted(per_country.items())}
+        distinct = set(entry["versions"].values())
+        # `version` and `pattern` only mean something when every country agrees.
+        # When they differ they are null, and a client must use each scope's own
+        # `path` -- which gen_manifest always records.
+        v = next(iter(distinct)) if len(distinct) == 1 else None
+        entry["version"] = v
+        entry["pattern"] = (
+            (f"{{scope}}.{layer}_v{v}.ptiles" if v else f"{{scope}}.{layer}.ptiles")
+            if len(distinct) == 1
+            else None
+        )
         entry["count"] = len(entry["scopes"])
         entry["bytes"] = sum(s["bytes"] for s in entry["scopes"].values())
         entry["countries"] = sorted({s["country"] for s in entry["scopes"].values()})

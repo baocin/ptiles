@@ -126,25 +126,46 @@ class PlacesReader(BlockFileReader):
         if idx_len > est_v1 + bc * 5 and est_v1 > 0:
             self._v2_index = True
 
-        # Read dictionary
-        f.seek(self._header["dict_offset"])
-        self._dict_data = f.read(self._header["dict_length"])
+        # Dictionary and index are read on first use, not here: the index costs
+        # roughly 1 KB of Python object per block, and a multi-country client
+        # opens far more files than it queries. See ptiles/reader.py.
+        self._index_cache = None
+        self._dict_cache = None
+        self._relative_offsets_cache = None
 
-        # Read index
-        f.seek(self._header["index_offset"])
-        index_bytes = f.read(idx_len)
-        if self._v2_index:
-            self._index = decode_index_v2(index_bytes)
-        else:
+
+    @property
+    def _index(self):
+        """Spatial index, decoded on first use -- see ptiles/reader.py."""
+        if self._index_cache is None:
             from ptiles.codec import read_index
 
-            self._index = read_index(index_bytes)
+            self._file.seek(self._header["index_offset"])
+            raw = self._file.read(self._header["index_length"])
+            self._index_cache = (
+                decode_index_v2(raw) if self._v2_index else read_index(raw)
+            )
+        return self._index_cache
 
-        # Detect relative offsets
-        self._relative_offsets = True
-        if self._index:
-            first_off = self._index[0]["block_offset"]
-            self._relative_offsets = first_off < self._header["blocks_offset"]
+    @property
+    def _dict_data(self):
+        if self._dict_cache is None:
+            self._file.seek(self._header["dict_offset"])
+            self._dict_cache = self._file.read(self._header["dict_length"])
+        return self._dict_cache
+
+    @property
+    def _relative_offsets(self):
+        if self._relative_offsets_cache is None:
+            idx = self._index
+            self._relative_offsets_cache = (
+                idx[0]["block_offset"] < self._header["blocks_offset"] if idx else True
+            )
+        return self._relative_offsets_cache
+
+    @property
+    def index_loaded(self):
+        return self._index_cache is not None
 
     def _read_block(self, cell_int: int) -> list[Place]:
         if self._v2_index:

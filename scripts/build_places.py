@@ -28,67 +28,13 @@ from shared import (
     write_header,
     HEADER_SIZE,
 )
-from states import STATES, get_state
+from states import STATES, get_state, pbf_path as find_pbf
 
-OUTPUT_DIR = Path("/home/aoi/kino/projects/ptiles/data/states")
+OUTPUT_DIR = Path("/mnt/core/kino/ptiles/data/states")
 PBF_DIR = Path("/mnt/aoi/kino/ptiles/pbfs")
 MAGIC = b"PTILESP\x00"
 VERSION = 1
 H3_RES = 7
-
-PBF_MAP = {
-    "AL": "alabama",
-    "AK": "alaska",
-    "AZ": "arizona",
-    "AR": "arkansas",
-    "CA": "california",
-    "CO": "colorado",
-    "CT": "connecticut",
-    "DE": "delaware",
-    "DC": "district-of-columbia",
-    "FL": "florida",
-    "GA": "georgia",
-    "HI": "hawaii",
-    "ID": "idaho",
-    "IL": "illinois",
-    "IN": "indiana",
-    "IA": "iowa",
-    "KS": "kansas",
-    "KY": "kentucky",
-    "LA": "louisiana",
-    "ME": "maine",
-    "MD": "maryland",
-    "MA": "massachusetts",
-    "MI": "michigan",
-    "MN": "minnesota",
-    "MS": "mississippi",
-    "MO": "missouri",
-    "MT": "montana",
-    "NE": "nebraska",
-    "NV": "nevada",
-    "NH": "new-hampshire",
-    "NJ": "new-jersey",
-    "NM": "new-mexico",
-    "NY": "new-york",
-    "NC": "north-carolina",
-    "ND": "north-dakota",
-    "OH": "ohio",
-    "OK": "oklahoma",
-    "OR": "oregon",
-    "PA": "pennsylvania",
-    "RI": "rhode-island",
-    "SC": "south-carolina",
-    "SD": "south-dakota",
-    "TN": "tennessee",
-    "TX": "texas",
-    "UT": "utah",
-    "VT": "vermont",
-    "VA": "virginia",
-    "WA": "washington",
-    "WV": "west-virginia",
-    "WI": "wisconsin",
-    "WY": "wyoming",
-}
 
 PT = [
     "city",
@@ -181,11 +127,8 @@ def enc(p, pid):
 
 
 def build_state(abbr):
-    pbfn = PBF_MAP.get(abbr)
-    if not pbfn:
-        return {"abbr": abbr, "error": "no mapping"}
-    pbfp = PBF_DIR / f"{pbfn}-latest.osm.pbf"
-    if not pbfp.exists():
+    pbfp = find_pbf(abbr, prefer=PBF_DIR)
+    if pbfp is None:
         return {"abbr": abbr, "error": "no pbf"}
     s = get_state(abbr)
     t0 = time.time()

@@ -10,6 +10,7 @@ Usage:
 import sys
 import os
 import time
+from array import array
 from pathlib import Path
 from collections import defaultdict
 
@@ -30,7 +31,8 @@ from encode_v8 import (
     parse_height,
     parse_levels,
 )
-from states import STATES, get_state, state_bbox
+from encoding import coord_to_micro, micro_to_coord
+from states import STATES, get_state, state_bbox, pbf_path as find_pbf
 
 PBF_DIR = Path("/mnt/core/timeline-ptiles-cache/raw")
 OUTPUT_DIR = Path("/mnt/core/kino/ptiles/data/v4/states")
@@ -38,59 +40,28 @@ H3_RES = 7
 MAGIC = b"PTILESF\x00"
 VERSION = 9
 
-STATE_PBF_NAMES = {
-    "AL": "alabama",
-    "AK": "alaska",
-    "AZ": "arizona",
-    "AR": "arkansas",
-    "CA": "california",
-    "CO": "colorado",
-    "CT": "connecticut",
-    "DE": "delaware",
-    "DC": "district-of-columbia",
-    "FL": "florida",
-    "GA": "georgia",
-    "HI": "hawaii",
-    "ID": "idaho",
-    "IL": "illinois",
-    "IN": "indiana",
-    "IA": "iowa",
-    "KS": "kansas",
-    "KY": "kentucky",
-    "LA": "louisiana",
-    "ME": "maine",
-    "MD": "maryland",
-    "MA": "massachusetts",
-    "MI": "michigan",
-    "MN": "minnesota",
-    "MS": "mississippi",
-    "MO": "missouri",
-    "MT": "montana",
-    "NE": "nebraska",
-    "NV": "nevada",
-    "NH": "new-hampshire",
-    "NJ": "new-jersey",
-    "NM": "new-mexico",
-    "NY": "new-york",
-    "NC": "north-carolina",
-    "ND": "north-dakota",
-    "OH": "ohio",
-    "OK": "oklahoma",
-    "OR": "oregon",
-    "PA": "pennsylvania",
-    "RI": "rhode-island",
-    "SC": "south-carolina",
-    "SD": "south-dakota",
-    "TN": "tennessee",
-    "TX": "texas",
-    "UT": "utah",
-    "VT": "vermont",
-    "VA": "virginia",
-    "WA": "washington",
-    "WV": "west-virginia",
-    "WI": "wisconsin",
-    "WY": "wyoming",
-}
+
+def as_dict(b):
+    """Compact building tuple back to the dict encode_block_v8 expects."""
+    osm_id, ring, btype, height, name, shop, amenity_val, opening_hours = b
+    d = {
+        "osm_id": osm_id,
+        "coords": [
+            [micro_to_coord(ring[i]), micro_to_coord(ring[i + 1])]
+            for i in range(0, len(ring), 2)
+        ],
+        "building_type": btype,
+        "height_m": height,
+    }
+    if name:
+        d["name"] = name
+    if shop:
+        d["shop"] = shop
+    if amenity_val:
+        d["amenity"] = amenity_val
+    if opening_hours:
+        d["opening_hours"] = opening_hours
+    return d
 
 
 class BuildingHandler(osmium.SimpleHandler):
@@ -105,8 +76,7 @@ class BuildingHandler(osmium.SimpleHandler):
         if not w.nodes:
             return
         try:
-            lon_sum, lat_sum = 0.0, 0.0
-            ring = []
+            ring = array("i")  # interleaved micro-degrees; see module docstring
             for node in w.nodes:
                 try:
                     lat = node.location.lat
@@ -119,13 +89,13 @@ class BuildingHandler(osmium.SimpleHandler):
                         and self.min_lat <= lat <= self.max_lat
                     ):
                         return
-                ring.append([lon, lat])
-                lon_sum += lon
-                lat_sum += lat
-            if len(ring) < 4:
+                ring.append(coord_to_micro(lon))
+                ring.append(coord_to_micro(lat))
+            if len(ring) < 8:  # fewer than 4 vertices
                 return
-            if ring[0] != ring[-1]:
+            if ring[0] != ring[-2] or ring[1] != ring[-1]:
                 ring.append(ring[0])
+                ring.append(ring[1])
 
             btype = "yes"
             name = None
@@ -154,21 +124,9 @@ class BuildingHandler(osmium.SimpleHandler):
             if height is None and levels is not None:
                 height = levels * METERS_PER_LEVEL
 
-            bldg = {
-                "osm_id": w.id,
-                "coords": ring,
-                "building_type": btype,
-                "height_m": height,
-            }
-            if name:
-                bldg["name"] = name
-            if shop:
-                bldg["shop"] = shop
-            if amenity_val:
-                bldg["amenity"] = amenity_val
-            if opening_hours:
-                bldg["opening_hours"] = opening_hours
-            self.buildings.append(bldg)
+            self.buildings.append(
+                (w.id, ring, btype, height, name, shop, amenity_val, opening_hours)
+            )
         except Exception:
             pass
 
@@ -177,13 +135,9 @@ def build_state_pbf(state):
     print(f"\n=== {state.abbr} {state.name} ===", flush=True)
     t0 = time.time()
 
-    pbf_name = STATE_PBF_NAMES.get(state.abbr)
-    if not pbf_name:
-        print(f"  No PBF file mapping for {state.abbr}")
-        return
-    pbf_path = PBF_DIR / f"{pbf_name}.osm.pbf"
-    if not pbf_path.exists():
-        print(f"  PBF not found: {pbf_path}")
+    pbf_path = find_pbf(state, prefer=PBF_DIR)
+    if pbf_path is None:
+        print(f"  No PBF extract found for {state.abbr}")
         return
 
     bbox = state_bbox(state)
@@ -196,13 +150,16 @@ def build_state_pbf(state):
         return
 
     print(f"  Extracted {len(bldgs)} buildings", flush=True)
-    bldgs.sort(key=lambda b: b["osm_id"])
+    bldgs.sort(key=lambda b: b[0])
 
-    # Group by H3 cell
+    # Group by H3 cell. The cell comes from the quantized first vertex, i.e. the
+    # coordinates actually stored in the file, so a building is always indexed
+    # under the cell its own stored geometry falls in. Against the pre-quantized
+    # float this moves ~0.02% of buildings (those within ~1m of a cell edge).
     cells = defaultdict(list)
     for b in bldgs:
-        lon, lat = b["coords"][0]
-        cell = h3.latlng_to_cell(lat, lon, H3_RES)
+        ring = b[1]
+        cell = h3.latlng_to_cell(micro_to_coord(ring[1]), micro_to_coord(ring[0]), H3_RES)
         cells[int(cell, 16)].append(b)
     print(f"  Grouped into {len(cells)} H3 cells", flush=True)
 
@@ -212,7 +169,7 @@ def build_state_pbf(state):
     total_features = 0
     index_entries = []
     for cell in sorted_cells:
-        block_bytes, count = encode_block_v8(cells[cell], cell)
+        block_bytes, count = encode_block_v8([as_dict(b) for b in cells[cell]], cell)
         raw_blocks[cell] = block_bytes
         total_features += count
         # NOTE: index_entries populated after compression (need block sizes)
@@ -309,7 +266,7 @@ def main():
 
     targets = []
     if args.all:
-        targets = [s for s in STATES if s.abbr in STATE_PBF_NAMES]
+        targets = [s for s in STATES if find_pbf(s, prefer=PBF_DIR)]
     elif args.target:
         s = get_state(args.target)
         if s:

@@ -60,32 +60,13 @@ from shared import (
     write_header,
     zigzag_encode,
 )
-from states import STATES, get_state
+from states import STATES, get_state, pbf_path as find_pbf
 
 OUTPUT_DIR = Path("/home/aoi/kino/projects/ptiles/tiles")
 PBF_DIR = Path("/mnt/aoi/kino/ptiles/pbfs")
 H3_RES = 7
 CELLS_PER_BLOCK = 8
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
-
-PBF_MAP = {
-    "AL": "alabama", "AK": "alaska", "AZ": "arizona", "AR": "arkansas",
-    "CA": "california", "CO": "colorado", "CT": "connecticut",
-    "DE": "delaware", "DC": "district-of-columbia", "FL": "florida",
-    "GA": "georgia", "HI": "hawaii", "ID": "idaho", "IL": "illinois",
-    "IN": "indiana", "IA": "iowa", "KS": "kansas", "KY": "kentucky",
-    "LA": "louisiana", "ME": "maine", "MD": "maryland",
-    "MA": "massachusetts", "MI": "michigan", "MN": "minnesota",
-    "MS": "mississippi", "MO": "missouri", "MT": "montana",
-    "NE": "nebraska", "NV": "nevada", "NH": "new-hampshire",
-    "NJ": "new-jersey", "NM": "new-mexico", "NY": "new-york",
-    "NC": "north-carolina", "ND": "north-dakota", "OH": "ohio",
-    "OK": "oklahoma", "OR": "oregon", "PA": "pennsylvania",
-    "RI": "rhode-island", "SC": "south-carolina", "SD": "south-dakota",
-    "TN": "tennessee", "TX": "texas", "UT": "utah", "VT": "vermont",
-    "VA": "virginia", "WA": "washington", "WV": "west-virginia",
-    "WI": "wisconsin", "WY": "wyoming",
-}
 
 SIGNAL_TYPES = ["traffic_signals", "crossing_signals", "stop", "give_way",
                 "railway_signals"]
@@ -640,13 +621,9 @@ def run(layers, abbrs, out_stem):
     t0 = time.time()
 
     for abbr in abbrs:
-        pbf_name = PBF_MAP.get(abbr)
-        if not pbf_name:
-            print(f"  {abbr}: no PBF mapping, skipped")
-            continue
-        pbf = PBF_DIR / f"{pbf_name}-latest.osm.pbf"
-        if not pbf.exists():
-            print(f"  {abbr}: {pbf.name} missing, skipped")
+        pbf = find_pbf(abbr, prefer=PBF_DIR)
+        if pbf is None:
+            print(f"  {abbr}: no PBF extract found, skipped")
             continue
         ts = time.time()
         found, skipped_ways = extract(str(pbf), layers)
@@ -727,7 +704,7 @@ def main():
                   f"{abbrs[0] if abbrs else '?'}.* file")
         stem = abbrs[0] if abbrs else None
     else:
-        abbrs = [s.abbr for s in STATES if s.abbr in PBF_MAP]
+        abbrs = [s.abbr for s in STATES if find_pbf(s, prefer=PBF_DIR)]
         stem = "US"
 
     if not abbrs:

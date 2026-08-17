@@ -39,9 +39,9 @@ from shared import (
     write_header,
     HEADER_SIZE,
 )
-from states import STATES, get_state
+from states import STATES, get_state, pbf_path as find_pbf
 
-OUTPUT_DIR = Path("/home/aoi/kino/projects/ptiles/data/states")
+OUTPUT_DIR = Path("/mnt/core/kino/ptiles/data/states")
 PBF_DIR = Path("/mnt/core/timeline-ptiles-cache/2026-08-06/pbf")
 MAGIC = b"PTILESH\x00"
 VERSION = 1
@@ -212,10 +212,9 @@ def build_state(abbr):
     s = get_state(abbr)
     if not s:
         return {"abbr": abbr, "error": "unknown state"}
-    # Geofabrik names the extract after the state, lowercased and hyphenated.
-    pbfp = PBF_DIR / f"{s.name.lower().replace(' ', '-')}-latest.osm.pbf"
-    if not pbfp.exists():
-        return {"abbr": abbr, "error": f"no pbf at {pbfp}"}
+    pbfp = find_pbf(s, prefer=PBF_DIR)
+    if pbfp is None:
+        return {"abbr": abbr, "error": "no pbf extract found"}
     t0 = time.time()
 
     features = extract(str(pbfp))

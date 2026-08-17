@@ -47,12 +47,17 @@ from shared import (
     encode_string_u16, encode_string_u8,
     encode_index_entry, train_dictionary,
 )
-from states import STATES as _STATES, get_state
+from states import (
+    STATES as _STATES,  # --all stays US-only
+    REGIONS as _REGIONS,  # bbox table covers non-US regions too
+    get_state,
+    pbf_path as find_pbf,
+)
 
 # Per-state batch build, matching the other builders: PBF_DIR in, OUTPUT_DIR
 # out, one {ST}.water_v{VERSION}.ptiles per state.
 PBF_DIR = Path("/mnt/core/timeline-ptiles-cache/2026-08-06/pbf")
-OUTPUT_DIR = Path("/home/aoi/kino/projects/ptiles/data/states")
+OUTPUT_DIR = Path("/mnt/core/kino/ptiles/data/states")
 VERSION = 1
 
 # Water type enum (matches Rust WATER_TYPE_REVERSE)
@@ -71,7 +76,7 @@ WATER_TYPES = {
 # (south, west, north, east) == (min_lat, min_lon, max_lat, max_lon), unpacked
 # that way in _in_bbox below.
 STATE_BBOX = {}
-for _s in _STATES:
+for _s in _REGIONS:
     _box = (_s.min_lat, _s.min_lon, _s.max_lat, _s.max_lon)
     STATE_BBOX[_s.name.lower().replace(" ", "-")] = _box
     STATE_BBOX[_s.abbr.lower()] = _box
@@ -555,11 +560,9 @@ def build_state(state) -> bool:
         print(f"  SKIP {state.abbr} -- already exists", flush=True)
         return False
     # The Geofabrik file name is the state name lowercased with spaces hyphenated;
-    # that matches all 51, so derive it rather than add a seventh copy of the
-    # abbr -> name table the other builders each carry.
-    pbf = PBF_DIR / f"{state.name.lower().replace(' ', '-')}-latest.osm.pbf"
-    if not pbf.exists():
-        print(f"  ERROR {state.abbr}: no pbf at {pbf}", flush=True)
+    pbf = find_pbf(state, prefer=PBF_DIR)
+    if pbf is None:
+        print(f"  ERROR {state.abbr}: no pbf extract found", flush=True)
         return False
 
     print(f"\n=== {state.abbr} {state.name} ===", flush=True)

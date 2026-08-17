@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-US States + DC metadata for PTILES generation.
+Region metadata for PTILES generation: US states + DC, plus non-US regions.
 
 FIPS codes, postal abbreviations, and tight bounding boxes (WGS84).
 BBoxes are derived from the Census 2023 cartographic boundary file
@@ -13,17 +13,24 @@ min/max lon pair cannot express that, so AK spans longitude fully; treat its
 lon range as 'unbounded', not as a meaningful extent.
 """
 
+from pathlib import Path
 from typing import NamedTuple
 
 
 class State(NamedTuple):
-    fips: str  # 2-digit FIPS code as string (e.g., "47")
+    fips: str  # 2-digit FIPS code as string (e.g., "47"); "" for non-US regions
     abbr: str  # USPS postal abbreviation (e.g., "TN")
     name: str  # Full name (e.g., "Tennessee")
     min_lon: float
     min_lat: float
     max_lon: float
     max_lat: float
+    pbf: str = ""  # Geofabrik basename; defaults to the slugified name
+
+    @property
+    def pbf_name(self) -> str:
+        """Geofabrik extract basename, e.g. 'district-of-columbia'."""
+        return self.pbf or self.name.lower().replace(" ", "-")
 
 
 # All 50 states + District of Columbia
@@ -83,12 +90,65 @@ STATES: list[State] = [
 ]
 
 
+# Non-US regions. Deliberately NOT in STATES: every builder's --all iterates
+# STATES, and a country-sized extract silently joining a 51-state run would be
+# a nasty surprise. Reach these by name, e.g. --states JP.
+# Every bbox below is read from the extract's own PBF header and rounded
+# outward, never hand-derived. A box fitted to one layer's extremes (e.g. the
+# road network) clips the outlying islands that other layers do reach.
+NON_US: list[State] = [
+    State("", "JP", "Japan", 122.55, 20.08, 154.48, 45.82, "japan"),
+    # Geofabrik splits Japan into 8 regions, not 47 prefectures. Bboxes are read
+    # from each extract's own PBF header, so they cover the outlying islands a
+    # mainland-shaped guess would clip: Kanto reaches Minamitorishima (155.6E)
+    # and Kyushu reaches Yonaguni (122.2E). The regions overlap slightly at their
+    # seams, exactly as the Geofabrik US state extracts do.
+    State("", "JP-HOKKAIDO", "Hokkaido", 137.93, 41.15, 146.25, 46.05, "hokkaido"),
+    State("", "JP-TOHOKU", "Tohoku", 138.93, 36.52, 142.88, 41.65, "tohoku"),
+    State("", "JP-KANTO", "Kanto", 134.04, 18.62, 155.61, 37.16, "kanto"),
+    State("", "JP-CHUBU", "Chubu", 135.43, 34.26, 139.91, 38.91, "chubu"),
+    State("", "JP-KANSAI", "Kansai", 133.96, 33.07, 137.66, 36.46, "kansai"),
+    State("", "JP-CHUGOKU", "Chugoku", 129.89, 33.54, 134.53, 37.09, "chugoku"),
+    State("", "JP-SHIKOKU", "Shikoku", 131.76, 32.22, 135.18, 34.66, "shikoku"),
+    State("", "JP-KYUSHU", "Kyushu", 122.23, 20.72, 132.81, 35.1, "kyushu"),
+]
+
+REGIONS: list[State] = STATES + NON_US
+
+# Geofabrik extracts have accumulated in three directories with two naming
+# conventions. Search all of them rather than making every builder pick one.
+PBF_DIRS = [
+    Path("/mnt/core/timeline-ptiles-cache/raw"),
+    Path("/mnt/core/timeline-ptiles-cache/2026-08-06/pbf"),
+    Path("/mnt/aoi/kino/ptiles/pbfs"),
+]
+
+
 def get_state(abbr_or_fips: str) -> State | None:
-    """Lookup by 2-letter abbr or 2-digit FIPS string."""
+    """Lookup by 2-letter abbr or 2-digit FIPS string. Includes non-US regions."""
     abbr_or_fips = abbr_or_fips.upper()
-    for s in STATES:
-        if s.abbr == abbr_or_fips or s.fips == abbr_or_fips:
+    for s in REGIONS:
+        if s.abbr == abbr_or_fips or (s.fips and s.fips == abbr_or_fips):
             return s
+    return None
+
+
+def pbf_path(region: "State | str", prefer: Path | None = None) -> Path | None:
+    """Locate a region's OSM extract. Returns None if no extract is on disk.
+
+    `prefer` is searched first. These directories hold extracts of different
+    vintages (raw/ is older than 2026-08-06/), so a caller that has always read
+    one of them must keep passing it or its output silently changes snapshot.
+    """
+    if isinstance(region, str):
+        region = get_state(region)
+        if region is None:
+            return None
+    for d in ([prefer] if prefer else []) + PBF_DIRS:
+        for fn in (f"{region.pbf_name}.osm.pbf", f"{region.pbf_name}-latest.osm.pbf"):
+            p = d / fn
+            if p.exists():
+                return p
     return None
 
 

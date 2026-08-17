@@ -47,13 +47,13 @@ from shared import (
     write_header,
     HEADER_SIZE,
 )
-from states import STATES, get_state
+from states import STATES, get_state, pbf_path as find_pbf
 
 # data/states is where the other builders write, but it is root-owned and
 # empty on this host (its contents are published and were cleared), so the
 # path is overridable. Point PTILES_OUT at scratch to build without touching
 # the repo -- 51 states of tiles do not belong in git.
-OUTPUT_DIR = Path(os.environ.get("PTILES_OUT", "/home/aoi/kino/projects/ptiles/data/states"))
+OUTPUT_DIR = Path(os.environ.get("PTILES_OUT", "/mnt/core/kino/ptiles/data/states"))
 PBF_DIR = Path("/mnt/core/timeline-ptiles-cache/2026-08-06/pbf")
 MAGIC = b"PTILESE\x00"
 VERSION = 1
@@ -257,9 +257,9 @@ def build_state(abbr):
     s = get_state(abbr)
     if not s:
         return {"abbr": abbr, "error": "unknown state"}
-    pbfp = PBF_DIR / f"{s.name.lower().replace(' ', '-')}-latest.osm.pbf"
-    if not pbfp.exists():
-        return {"abbr": abbr, "error": f"no pbf at {pbfp}"}
+    pbfp = find_pbf(s, prefer=PBF_DIR)
+    if pbfp is None:
+        return {"abbr": abbr, "error": "no pbf extract found"}
     t0 = time.time()
 
     features = extract(str(pbfp))

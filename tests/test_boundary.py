@@ -24,18 +24,23 @@ from ptiles.codec import decode_boundary  # noqa: E402
 DATA = Path("/mnt/core/kino/ptiles/data")
 
 
-def _newest(pattern: str) -> Path | None:
-    """Resolve a layer file whatever its version suffix.
-
-    Pinning places_v1 here meant these tests silently started skipping the
-    moment the layer went to v2 -- the exact failure mode they exist to catch.
-    """
-    found = sorted(DATA.glob(pattern))
-    return found[-1] if found else None
+# Neither the version suffix nor the scope is stable: pinning places_v1 sent
+# these to silent skips when the layer went to v2, and pinning JP-SHIKOKU sent
+# them there again when those test artifacts were cleaned up. Resolve both.
+SCOPES = ("JP-SHIKOKU", "JP")
 
 
-_sp = _newest("states/JP-SHIKOKU.places_v*.ptiles")
-SHIKOKU_PLACES = _sp if _sp else DATA / "states/JP-SHIKOKU.places_v2.ptiles"
+def _newest(layer: str) -> Path | None:
+    """Newest file for `layer`, whatever its scope and version suffix."""
+    for scope in SCOPES:
+        found = sorted(DATA.glob(f"states/{scope}.{layer}_v*.ptiles"))
+        if found:
+            return found[-1]
+    return None
+
+
+_sp = _newest("places")
+SHIKOKU_PLACES = _sp if _sp else DATA / "states/JP.places_v2.ptiles"
 KANTO_BUILDINGS = DATA / "v4/states/JP-KANTO.buildings_v9.ptiles"
 
 

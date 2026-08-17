@@ -14,6 +14,8 @@ import zstandard as zstd
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(__file__))
+from boundaries import stamp_boundary
+from states import get_state
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 
 from ptiles.flightnodes import flight_categories, is_flight_node
@@ -403,6 +405,12 @@ def build_state_ptiles(state, brand_map, chain_idx):
             f.seek(idx_pos + 8)
             f.write((bo + e["block_offset"]).to_bytes(6, "little"))
             idx_pos += 19
+
+    # Boundary last: it goes on the end of the file, after the offset fix-up
+    # above has finished rewriting the index in place.
+    _region = get_state(state)
+    if _region is not None:
+        stamp_boundary(out, _region)
 
     size = os.path.getsize(out)
     print(f"  Written: {size / 1024 / 1024:.1f} MB ({len(records):,} POIs)", flush=True)

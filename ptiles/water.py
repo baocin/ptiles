@@ -33,6 +33,7 @@ from ptiles.codec import (
     decompress_block,
     HEADER_SIZE,
 )
+from ptiles.reader import BoundaryMixin
 
 logger = logging.getLogger("ptiles.water")
 
@@ -193,7 +194,7 @@ def decode_block(data: bytes) -> list[dict]:
     return features
 
 
-class WaterReader:
+class WaterReader(BoundaryMixin):
     """Reader for .water.ptiles files."""
 
     def __init__(self, f: io.BufferedReader, filepath: str):

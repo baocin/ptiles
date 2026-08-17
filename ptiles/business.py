@@ -34,6 +34,7 @@ from ptiles.codec import (
     decode_merged_block_header,
     INDEX_ENTRY_SIZE_V2,
 )
+from ptiles.reader import BoundaryMixin
 
 logger = logging.getLogger("ptiles.business")
 
@@ -450,7 +451,7 @@ def decode_merged_block_for_cell(raw: bytes, cell_index: int) -> list[dict]:
     return businesses
 
 
-class BusinessReader:
+class BusinessReader(BoundaryMixin):
     """Reader for .business.ptiles files."""
 
     def __init__(self, f: io.BufferedReader, filepath: str,

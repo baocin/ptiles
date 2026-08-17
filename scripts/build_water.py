@@ -47,6 +47,7 @@ from shared import (
     encode_string_u16, encode_string_u8,
     encode_index_entry, train_dictionary,
 )
+from boundaries import stamp_boundary
 from states import (
     STATES as _STATES,  # --all stays US-only
     REGIONS as _REGIONS,  # bbox table covers non-US regions too
@@ -421,7 +422,7 @@ def assign_to_h3_cells(features: list[dict]) -> dict[int, list[dict]]:
     return dict(cell_features), large_features
 
 
-def build_water_ptiles(features: list[dict], output_path: str):
+def build_water_ptiles(features: list[dict], output_path: str, region_obj=None):
     """Build the .water.ptiles file."""
     t0 = time.time()
 
@@ -543,6 +544,9 @@ def build_water_ptiles(features: list[dict], output_path: str):
         if feature_table_compressed:
             f.write(feature_table_compressed)
 
+    if region_obj is not None:
+        stamp_boundary(output_path, region_obj)
+
     elapsed = time.time() - t0
     file_size = os.path.getsize(output_path)
     print(f"\nDone in {elapsed:.1f}s")
@@ -572,7 +576,7 @@ def build_state(state) -> bool:
         print(f"  {state.abbr}  0 features -- nothing written", flush=True)
         return False
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    build_water_ptiles(features, str(out))
+    build_water_ptiles(features, str(out), region_obj=state)
     print(f"  {state.abbr:2s} {len(features):8,d} features  "
           f"{out.stat().st_size:10,d} B  {time.time() - t0:6.1f}s", flush=True)
     return True

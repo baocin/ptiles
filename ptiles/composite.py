@@ -171,7 +171,28 @@ class _LayerBase:
         if b is None:
             return True
         s, w, n, e = b
-        return (s - pad) <= lat <= (n + pad) and lon_within(w, e, lon, pad)
+        if not ((s - pad) <= lat <= (n + pad) and lon_within(w, e, lon, pad)):
+            return False
+        # Inside the bbox: if the file carries its own boundary polygon, use it.
+        # This is what separates two overlapping regional extracts -- Kanto's and
+        # Chubu's boxes overlap across Tokyo, so the bbox alone cannot say which
+        # file owns a point there. Only narrow on an unpadded query: a padded one
+        # is asking about the neighbourhood, which may legitimately fall outside.
+        if pad == 0.0:
+            rings = self.region_boundary
+            if rings:
+                from ptiles.geometry import point_in_polygon
+
+                return any(point_in_polygon(lon, lat, tuple(r)) for r in rings)
+        return True
+
+    @property
+    def region_boundary(self):
+        """The file's own boundary rings, or [] when it carries none."""
+        try:
+            return self._reader.boundary
+        except Exception:
+            return []
 
     def intersects(self, min_lat, min_lon, max_lat, max_lon):
         b = self.bounds

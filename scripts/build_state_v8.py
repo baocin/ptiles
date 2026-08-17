@@ -32,6 +32,7 @@ from encode_v8 import (
     parse_levels,
 )
 from encoding import coord_to_micro, micro_to_coord
+from boundaries import stamp_boundary
 from states import (
     STATES,
     get_state,
@@ -262,6 +263,7 @@ def build_state_pbf(state):
         f.seek(blocks_offset)
         for cell in sorted_cells:
             f.write(compressed[cell])
+    stamp_boundary(out_path, state)
 
     dt = time.time() - t0
     sz = out_path.stat().st_size

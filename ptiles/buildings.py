@@ -41,6 +41,7 @@ from ptiles.codec import (
     HEADER_SIZE,
     coord_to_micro,
 )
+from ptiles.reader import BoundaryMixin
 
 logger = logging.getLogger("ptiles.buildings")
 
@@ -310,7 +311,7 @@ def decode_v8_block(data: bytes, cell_center_lon: float, cell_center_lat: float)
     return buildings
 
 
-class BuildingsReader:
+class BuildingsReader(BoundaryMixin):
     """Reader for .buildings_v8.ptiles files.
 
     Supports v6 (zigzag deltas), v7 (wall-segment), and v8 (cell-relative

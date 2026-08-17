@@ -572,6 +572,11 @@ class PtlrRoadsReader:
             counts = struct.unpack_from("<III", head, 72)
             for name, count in zip(PTLR_BANDS, counts):
                 self._bands[name]["count"] = count
+            # Boundary polygon at @100/@108 -- PTLR's own bbox occupies @84,
+            # where the PTiles layers put their boundary fields.
+            self._boundary_off, self._boundary_len = struct.unpack_from(
+                "<QI", head, 100
+            )
             mnx, mny, mxx, mxy = struct.unpack_from("<iiii", head, 84)
             self._bounds = None if (mnx, mny, mxx, mxy) == (0, 0, 0, 0) else (
                 mny / 100_000, mnx / 100_000, mxy / 100_000, mxx / 100_000
@@ -584,9 +589,11 @@ class PtlrRoadsReader:
             # this the 51 US files stay unreadable until they are rebuilt.
             self._dict_lens = self._recover_v1_dict_lens()
             self._bounds = None
+            self._boundary_off = self._boundary_len = 0
 
         self._band_cache: dict[str, bytes] = {}
         self._grid_cache: dict[str, dict] = {}
+        self._boundary_cache = None
 
     _ZSTD_DICT_MAGIC = b"\x37\xa4\x30\xec"
 
@@ -630,6 +637,21 @@ class PtlrRoadsReader:
     @property
     def index_loaded(self) -> bool:
         return bool(self._grid_cache)
+
+    @property
+    def boundary(self) -> list:
+        """The region's boundary rings, or [] when the file carries none."""
+        if self._boundary_cache is None:
+            if not self._boundary_off or not self._boundary_len:
+                self._boundary_cache = []
+            else:
+                from ptiles.codec import decode_boundary
+
+                self._file.seek(self._boundary_off)
+                self._boundary_cache = decode_boundary(
+                    self._file.read(self._boundary_len)
+                )
+        return self._boundary_cache
 
     def _dict_for(self, band: str) -> bytes:
         if not self._dict_lens:

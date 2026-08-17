@@ -244,7 +244,18 @@ def decode_string_u8(data: bytes, pos: int) -> tuple[str, int]:
 # --- PTiles Header (256 bytes) ---
 
 HEADER_SIZE = 256
-HEADER_STRUCT = struct.Struct("<7sB B 3x f f f f Q I Q I Q I Q Q I 172x")
+HEADER_STRUCT = struct.Struct("<7sB B 3x f f f f Q I Q I Q I Q Q I Q I 160x")
+# magic(7) + null(1) + version(1) + pad(3) + min_lat(4) + min_lon(4) + max_lat(4) + max_lon(4)
+# + feature_count(8) + block_count(4) + dict_offset(8) + dict_length(4)
+# + index_offset(8) + index_length(4) + blocks_offset(8) + aux_offset(8) + aux_length(4)
+# + boundary_offset(8) @84 + boundary_length(4) @92 + reserved(160)
+#
+# boundary_* points at a PTBD block holding the region's own boundary polygon,
+# so a file can be identified and de-duplicated without the admin layer. Both
+# are 0 in every file written before the field existed, which readers must treat
+# as "absent" and fall back to the bbox above. aux is NOT reused for this: water,
+# admin and points each store something different there and ptiles/admin.py reads
+# it unconditionally with no magic check.
 
 # Fields:
 # magic(7) + null(1) + version(1) + pad(3) + min_lat(4) + min_lon(4)
@@ -287,8 +298,15 @@ def write_header(
     blocks_offset: int,
     aux_offset: int = 0,
     aux_length: int = 0,
+    boundary_offset: int = 0,
+    boundary_length: int = 0,
 ):
-    """Write 256-byte PTiles header."""
+    """Write 256-byte PTiles header.
+
+    boundary_* locates a PTBD block holding the region's own boundary polygon.
+    Both default to 0, which is what every file written before the field says,
+    and readers take that to mean the polygon is absent.
+    """
     _check_magic(magic)
     header = HEADER_STRUCT.pack(
         magic[:7],
@@ -307,6 +325,8 @@ def write_header(
         blocks_offset,
         aux_offset,
         aux_length,
+        boundary_offset,
+        boundary_length,
     )
     f.write(header)
 
@@ -334,6 +354,8 @@ def read_header(f: io.BufferedReader) -> dict:
         "blocks_offset": vals[13],
         "aux_offset": vals[14],
         "aux_length": vals[15],
+        "boundary_offset": vals[16],
+        "boundary_length": vals[17],
     }
 
 
@@ -745,3 +767,39 @@ def decode_merged_block_header(data: bytes) -> dict:
         "cell_offsets": cell_offsets,
         "record_data_offset": pos,
     }
+
+
+# ===========================================================================
+# Region boundary (PTBD) -- writer side lives in scripts/encoding.py
+# ===========================================================================
+
+BOUNDARY_MAGIC = b"PTBD"
+BOUNDARY_VERSION = 1
+
+
+def decode_boundary(data: bytes) -> list[list[tuple[float, float]]]:
+    """Decode a PTBD boundary block. Returns [] for empty or unrecognised input.
+
+    The block is self-describing (magic + version) precisely because the aux
+    section is not: each layer stores something different there with nothing to
+    tell them apart, so a reader that guesses wrong reads garbage.
+    """
+    if not data or len(data) < 7 or data[:4] != BOUNDARY_MAGIC:
+        return []
+    if data[4] != BOUNDARY_VERSION:
+        return []
+    (ring_count,) = struct.unpack_from("<H", data, 5)
+    pos = 7
+    rings = []
+    for _ in range(ring_count):
+        try:
+            (count,) = struct.unpack_from("<I", data, pos)
+            pos += 4
+            first_lon, first_lat = struct.unpack_from("<ii", data, pos)
+            pos += 8
+            coords, consumed = decode_coordinates(data, pos, first_lon, first_lat, count)
+            pos += consumed
+        except (struct.error, IndexError):
+            break
+        rings.append(coords)
+    return rings

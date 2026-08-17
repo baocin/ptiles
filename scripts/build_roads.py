@@ -14,7 +14,8 @@ File layout (256-byte header + 3 ZSTD frames):
           + z04_dict_len(4) + z05_dict_len(4) + z07_dict_len(4)   @60
           + z04_count(4) + z05_count(4) + z07_count(4)            @72
           + min_lon(4) + min_lat(4) + max_lon(4) + max_lat(4)     @84, micro-deg
-          + pad(156)
+          + boundary_offset(8) @100 + boundary_length(4) @108
+          + pad(144)
   Band dictionaries are concatenated at offset 256 in Z04, Z05, Z07 order;
   split them using the three dict_len fields.
   Z04 frame (res 4, zoom 5-9): highways only, epsilon=500m
@@ -354,6 +355,8 @@ def write_ptiles(
         # is how a v2 file written before this field reads, and no real region
         # is exactly 0/0/0/0.
         struct.pack_into("<iiii", hdr, 84, *bounds)
+        # @100/@108, not @84: PTLR is its own container and already uses 84 for
+        # the bbox above. The PTiles layers put boundary_* at 84/92.
         f.write(hdr)
 
         # Band dictionaries
@@ -386,6 +389,29 @@ def write_ptiles(
 # ===========================================================================
 # Main
 # ===========================================================================
+
+
+
+def _stamp_roads_boundary(output_path):
+    """Append the region's boundary polygon and point the PTLR header at it.
+
+    PTLR keeps its own bbox at @84, so the boundary fields live at @100/@108 --
+    the PTiles layers use 84/92. The scope comes from the output filename, since
+    build_roads takes a raw PBF path rather than a region.
+    """
+    import os.path
+
+    scope = os.path.basename(output_path).split(".")[0]
+    try:
+        from boundaries import stamp_boundary_at
+        from states import get_state
+
+        region = get_state(scope)
+        if region is None:
+            return
+        stamp_boundary_at(output_path, region, offset_field=100)
+    except Exception as e:
+        print(f"  boundary: skipped for {scope}: {e}", flush=True)
 
 
 def main():
@@ -423,6 +449,8 @@ def main():
         [d04, d05, d07],
         roads_bounds(roads),
     )
+
+    _stamp_roads_boundary(output_path)
 
     elapsed = time.time() - t0
     print(f"\nDone in {elapsed:.1f}s", flush=True)

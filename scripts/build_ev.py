@@ -47,6 +47,7 @@ from shared import (
     write_header,
     HEADER_SIZE,
 )
+from boundaries import stamp_boundary
 from states import STATES, get_state, pbf_path as find_pbf, scopes_for_country
 
 # data/states is where the other builders write, but it is root-owned and
@@ -377,6 +378,7 @@ def build_state(abbr):
             )
         for cb in cbs:
             f.write(cb)
+    stamp_boundary(op, s)
 
     powered = sum(1 for f in features if f["power_dkw"] > 0)
     return {

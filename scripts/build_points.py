@@ -60,6 +60,7 @@ from shared import (
     write_header,
     zigzag_encode,
 )
+from boundaries import stamp_boundary
 from states import STATES, get_state, pbf_path as find_pbf
 
 OUTPUT_DIR = Path("/home/aoi/kino/projects/ptiles/tiles")
@@ -317,7 +318,7 @@ def build_coarse_index(entries):
     return bytes(out)
 
 
-def write_layer(name, points, out_stem, bbox):
+def write_layer(name, points, out_stem, bbox, region_obj=None):
     """Write one .ptiles file. Returns a stats dict."""
     spec = LAYERS[name]
     by_cell = defaultdict(list)
@@ -405,6 +406,8 @@ def write_layer(name, points, out_stem, bbox):
                 e["cell_index"]))
         for cb in comp:
             f.write(cb)
+    if region_obj is not None:
+        stamp_boundary(out_path, region_obj)
 
     return {"layer": name, "path": out_path, "points": len(points),
             "cells": len(by_cell), "blocks": len(blocks),
@@ -651,7 +654,10 @@ def run(layers, abbrs, out_stem):
         # useless to a reader culling by declared bounds.
         bbox = (min(p["lat"] for p in pts), min(p["lon"] for p in pts),
                 max(p["lat"] for p in pts), max(p["lon"] for p in pts))
-        r = write_layer(name, pts, out_stem, bbox)
+        # The file is named after out_stem, so that is the scope whose boundary
+        # describes it -- get_state returns None for a multi-scope stem, and the
+        # stamp is then skipped rather than guessed.
+        r = write_layer(name, pts, out_stem, bbox, region_obj=get_state(out_stem))
         v = verify_file(r["path"])
         r["verified"] = v
         results.append(r)

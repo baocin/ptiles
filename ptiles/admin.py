@@ -21,6 +21,7 @@ from ptiles.codec import (
     read_header,
     decode_string_u16,
 )
+from ptiles.reader import BoundaryMixin
 
 logger = logging.getLogger("ptiles.admin")
 
@@ -120,7 +121,7 @@ def binary_search_grid(grid_data: bytes, cell_int: int) -> dict | None:
     return None
 
 
-class AdminReader:
+class AdminReader(BoundaryMixin):
     """Reader for .admin.ptiles files."""
 
     def __init__(self, f: io.BufferedReader, filepath: str):

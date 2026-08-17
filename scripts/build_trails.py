@@ -39,6 +39,7 @@ from shared import (
     write_header,
     HEADER_SIZE,
 )
+from boundaries import stamp_boundary
 from states import STATES, get_state, pbf_path as find_pbf, scopes_for_country
 
 OUTPUT_DIR = Path("/mnt/core/kino/ptiles/data/states")
@@ -336,6 +337,7 @@ def build_state(abbr):
             )
         for cb in cbs:
             f.write(cb)
+    stamp_boundary(op, s)
 
     return {
         "abbr": abbr,

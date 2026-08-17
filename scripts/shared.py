@@ -24,10 +24,18 @@ except ImportError:
 # ===========================================================================
 
 HEADER_SIZE = 256
-HEADER_STRUCT = struct.Struct("<7sB B 3x f f f f Q I Q I Q I Q Q I 172x")
+HEADER_STRUCT = struct.Struct("<7sB B 3x f f f f Q I Q I Q I Q Q I Q I 160x")
 # magic(7) + null(1) + version(1) + pad(3) + min_lat(4) + min_lon(4) + max_lat(4) + max_lon(4)
 # + feature_count(8) + block_count(4) + dict_offset(8) + dict_length(4)
-# + index_offset(8) + index_length(4) + blocks_offset(8) + aux_offset(8) + aux_length(4) + reserved(172)
+# + index_offset(8) + index_length(4) + blocks_offset(8) + aux_offset(8) + aux_length(4)
+# + boundary_offset(8) @84 + boundary_length(4) @92 + reserved(160)
+#
+# boundary_* points at a PTBD block holding the region's own boundary polygon,
+# so a file can be identified and de-duplicated without the admin layer. Both
+# are 0 in every file written before the field existed, which readers must treat
+# as "absent" and fall back to the bbox above. aux is NOT reused for this: water,
+# admin and points each store something different there and ptiles/admin.py reads
+# it unconditionally with no magic check.
 
 
 def _check_magic(magic: bytes) -> None:
@@ -65,8 +73,15 @@ def write_header(
     blocks_offset: int,
     aux_offset: int = 0,
     aux_length: int = 0,
+    boundary_offset: int = 0,
+    boundary_length: int = 0,
 ):
-    """Write 256-byte PTiles header."""
+    """Write 256-byte PTiles header.
+
+    boundary_* locates a PTBD block holding the region's own boundary polygon.
+    Both default to 0, which is what every file written before the field says,
+    and readers take that to mean the polygon is absent.
+    """
     _check_magic(magic)
     header = HEADER_STRUCT.pack(
         magic[:7],
@@ -85,6 +100,8 @@ def write_header(
         blocks_offset,
         aux_offset,
         aux_length,
+        boundary_offset,
+        boundary_length,
     )
     f.write(header)
 
@@ -111,6 +128,8 @@ def read_header(f: io.BufferedReader) -> dict:
         "blocks_offset": vals[13],
         "aux_offset": vals[14],
         "aux_length": vals[15],
+        "boundary_offset": vals[16],
+        "boundary_length": vals[17],
     }
 
 

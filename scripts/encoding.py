@@ -203,3 +203,87 @@ def decode_vertex_count(
     if packed == 0x0F:
         return data[pos], 1
     return packed + 4, 0
+
+
+# ===========================================================================
+# Region boundary (PTBD)
+# ===========================================================================
+
+BOUNDARY_MAGIC = b"PTBD"
+BOUNDARY_VERSION = 1
+
+# ~200 m. This polygon exists to identify and de-duplicate a file, not to draw
+# it, so it is simplified far harder than the admin layer's 50 m.
+BOUNDARY_SIMPLIFY_DEG = 0.002
+# This polygon rides in every layer's file for a region, so its cost is paid
+# roughly ten times over per region. 4k vertices is far more shape than an
+# identity or coverage test needs; Alaska is the only region that comes close.
+BOUNDARY_MAX_VERTICES = 4_000
+
+
+def encode_boundary(rings: list[list[tuple[float, float]]]) -> bytes:
+    """Encode a region's boundary rings as a self-describing PTBD block.
+
+        magic "PTBD" | u8 version | u16 ring_count
+        per ring: u32 vertex_count, i32 first_lon, i32 first_lat, delta bytes
+
+    Self-describing on purpose. The aux section carries a different payload in
+    each layer that uses it, with no magic to tell them apart, and a reader that
+    guesses wrong reads garbage -- this block says what it is.
+
+    Rings are (lon, lat) degree pairs; coordinates go through
+    encode_coordinates, so the wire form matches every other geometry here.
+    """
+    rings = [r for r in rings if len(r) >= 3]
+    if not rings:
+        return b""
+    buf = bytearray()
+    buf.extend(BOUNDARY_MAGIC)
+    buf.append(BOUNDARY_VERSION)
+    buf.extend(struct.pack("<H", min(len(rings), 0xFFFF)))
+    for ring in rings[:0xFFFF]:
+        delta_bytes, first_lon, first_lat = encode_coordinates(ring)
+        buf.extend(struct.pack("<I", len(ring)))
+        buf.extend(struct.pack("<ii", first_lon, first_lat))
+        buf.extend(delta_bytes)
+    return bytes(buf)
+
+
+def decode_boundary(data: bytes) -> list[list[tuple[float, float]]]:
+    """Decode a PTBD block. Returns [] for empty or unrecognised input."""
+    if not data or len(data) < 7 or data[:4] != BOUNDARY_MAGIC:
+        return []
+    version = data[4]
+    if version != BOUNDARY_VERSION:
+        return []
+    (ring_count,) = struct.unpack_from("<H", data, 5)
+    pos = 7
+    rings = []
+    for _ in range(ring_count):
+        (count,) = struct.unpack_from("<I", data, pos)
+        pos += 4
+        first_lon, first_lat = struct.unpack_from("<ii", data, pos)
+        pos += 8
+        coords, consumed = decode_coordinates(data, pos, first_lon, first_lat, count)
+        pos += consumed
+        rings.append(coords)
+    return rings
+
+
+def append_boundary(path, rings) -> int:
+    """Append a PTBD block to a finished file and point the header at it.
+
+    Called after a builder has written everything else, so no existing offset
+    arithmetic has to change: the block goes on the end and only the two header
+    fields at @84 move. Returns the bytes written, 0 when there is no boundary.
+    """
+    blob = encode_boundary(rings)
+    if not blob:
+        return 0
+    with open(path, "r+b") as f:
+        f.seek(0, 2)
+        offset = f.tell()
+        f.write(blob)
+        f.seek(84)
+        f.write(struct.pack("<QI", offset, len(blob)))
+    return len(blob)

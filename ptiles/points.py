@@ -35,6 +35,7 @@ from ptiles.codec import (
     read_header,
     read_index_auto,
 )
+from ptiles.reader import BoundaryMixin
 
 logger = logging.getLogger("ptiles.points")
 
@@ -86,7 +87,7 @@ def parse_coarse_index(aux: bytes) -> CoarseIndex | None:
     return CoarseIndex(stride=stride, entry_count=entry_count, samples=samples)
 
 
-class PointLayerReader:
+class PointLayerReader(BoundaryMixin):
     """Base for US-wide point layers stored in merged blocks."""
 
     magic: bytes = b""

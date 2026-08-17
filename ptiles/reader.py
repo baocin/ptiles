@@ -20,12 +20,42 @@ from ptiles.codec import (
     binary_search_index,
     decode_index_v2,
     decode_merged_block_header,
+    decode_boundary,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class BlockFileReader:
+class BoundaryMixin:
+    """The region-boundary accessor, for readers that are not BlockFileReader.
+
+    buildings, water, business, admin and the point layers each have their own
+    __init__ and do not inherit from BlockFileReader, so they pick the boundary
+    up from here rather than each carrying a copy.
+    """
+
+    _boundary_cache = None
+
+    @property
+    def boundary(self) -> list[list[tuple[float, float]]]:
+        """The region's own boundary rings, or [] when the file carries none.
+
+        Lets a file be identified and de-duplicated without the admin layer: the
+        header bbox separates Alaska from Delaware but not two overlapping
+        regional extracts. Read on first use, like the index.
+        """
+        if self._boundary_cache is None:
+            off = self._header.get("boundary_offset", 0)
+            length = self._header.get("boundary_length", 0)
+            if not off or not length:
+                self._boundary_cache = []
+            else:
+                self._file.seek(off)
+                self._boundary_cache = decode_boundary(self._file.read(length))
+        return self._boundary_cache
+
+
+class BlockFileReader(BoundaryMixin):
     """Base reader for PTiles block files.
 
     Subclasses call super().__init__(f, filepath) or use open() classmethod.
@@ -34,6 +64,10 @@ class BlockFileReader:
       - resolve_offset()
       - read_block_raw() -- seek + decompress with dict fallback
     """
+
+    # Class-level so subclasses with their own __init__ (places, parks, rail)
+    # inherit it without each having to remember.
+    _boundary_cache = None
 
     def __init__(self, f: io.BufferedReader, filepath: str):
         self._file = f
@@ -100,8 +134,6 @@ class BlockFileReader:
     def index_loaded(self) -> bool:
         """Whether the index has actually been decoded. For tests and metrics."""
         return self._index_cache is not None
-
-
 
     def resolve_offset(self, offset: int) -> int:
         """Convert relative index offset to absolute file offset."""

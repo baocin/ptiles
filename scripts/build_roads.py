@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build TN.roads.ptiles — three zoom bands in one file, no H3 split.
+Build a {REGION}.roads.ptiles — three zoom bands in one file, no H3 split.
 
 Each road is encoded once per zoom band. Lower zoom bands use
 Douglas-Peucker simplified geometry.
@@ -10,7 +10,12 @@ File layout (256-byte header + 3 ZSTD frames):
           + z04_off(8) + z04_comp(4) + z04_decomp(4)
           + z05_off(8) + z05_comp(4) + z05_decomp(4)
           + z07_off(8) + z07_comp(4) + z07_decomp(4)
-          + road_count(4) + pad(188)
+          + road_count(4)                          @56, == z07_count
+          + z04_dict_len(4) + z05_dict_len(4) + z07_dict_len(4)   @60
+          + z04_count(4) + z05_count(4) + z07_count(4)            @72
+          + pad(172)
+  Band dictionaries are concatenated at offset 256 in Z04, Z05, Z07 order;
+  split them using the three dict_len fields.
   Z04 frame (res 4, zoom 5-9): highways only, epsilon=500m
   Z05 frame (res 5, zoom 10-12): all roads, epsilon=200m
   Z07 frame (res 7, zoom 13+): all roads, full precision
@@ -39,14 +44,21 @@ import zstandard as zstd
 from shapely.geometry import LineString
 
 sys.path.insert(0, os.path.dirname(__file__))
-from shared import encode_varint, encode_coordinates
+from array import array
+
+from shared import encode_varint, encode_coordinates, coord_to_micro, micro_to_coord
 
 # ===========================================================================
 # Constants
 # ===========================================================================
 
 HEADER_SIZE = 256
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2  # v2 adds per-band dict lengths + per-band road counts
+
+# Highway tags absent from ROAD_CLASS_INDEX (highway=road, busway, corridor,
+# and anything new OSM adds). Must not default to 0 -- that is motorway, which
+# would promote unknown ways into the Z04 highway-only band.
+DEFAULT_ROAD_CLASS = 5  # unclassified
 
 ZOOM_BANDS = [
     {
@@ -109,30 +121,37 @@ ROAD_CLASS_INDEX = {
 
 
 class RoadExtractor(osmium.SimpleHandler):
+    """Collect every highway way in the PBF.
+
+    Roads are held as 5-tuples with coordinates in an array('i') of interleaved
+    micro-degrees, not dicts of float tuples. A country-sized PBF has tens of
+    millions of vertices and a Python (float, float) tuple costs ~80 bytes
+    against 8 for two array slots -- Japan OOMs at 14 GB the other way.
+    Micro-degrees are lossless here: encode_coordinates rounds to 1e5 anyway.
+    """
+
     def __init__(self):
         super().__init__()
         self.roads = []
 
     def way(self, w):
         tags = dict(w.tags)
-        if not tags.get("highway"):
+        highway = tags.get("highway")
+        if not highway:
             return
-        if tags["highway"] in ("proposed", "construction", "raceway", "escape"):
+        if highway in ("proposed", "construction", "raceway", "escape"):
             return
+        coords = array("i")
         try:
-            coords = [(n.lon, n.lat) for n in w.nodes]
+            for n in w.nodes:
+                coords.append(coord_to_micro(n.lon))
+                coords.append(coord_to_micro(n.lat))
         except osmium.InvalidLocationError:
             return
-        if len(coords) < 2:
+        if len(coords) < 4:  # fewer than 2 vertices
             return
         self.roads.append(
-            {
-                "osm_id": w.id,
-                "coords": coords,
-                "highway": tags["highway"],
-                "name": tags.get("name"),
-                "ref": tags.get("ref"),
-            }
+            (w.id, coords, highway, tags.get("name"), tags.get("ref"))
         )
 
 
@@ -158,9 +177,8 @@ def encode_road(osm_id, prev_osm_id, coords, highway, road_class, name, ref):
     buf.extend(struct.pack("<ii", first_lon, first_lat))
     buf.extend(delta_bytes)
 
-    # Road class (indexed)
-    idx = ROAD_CLASS_INDEX.get(highway, 0)
-    buf.append(min(idx, 255))
+    # Road class (indexed) -- resolved by the caller, must match band filtering
+    buf.append(min(road_class, 255))
 
     # Flags
     flags = 0
@@ -212,31 +230,26 @@ def build_zoom_band(roads, epsilon, max_road_class, dict_data, level):
     skipped_class = 0
     skipped_short = 0
 
-    for road in roads:
-        highway = road["highway"]
-        rc = ROAD_CLASS_INDEX.get(highway, 0)
+    for osm_id, mcoords, highway, name, ref in roads:
+        rc = ROAD_CLASS_INDEX.get(highway, DEFAULT_ROAD_CLASS)
         if rc > max_road_class:
             skipped_class += 1
             continue
 
-        coords = road["coords"]
+        # Micro-degrees back to float only for this one road -- see RoadExtractor
+        coords = [
+            (micro_to_coord(mcoords[i]), micro_to_coord(mcoords[i + 1]))
+            for i in range(0, len(mcoords), 2)
+        ]
         if epsilon > 0:
             coords = simplify_coords(coords, epsilon)
         if len(coords) < 2:
             skipped_short += 1
             continue
 
-        record = encode_road(
-            road["osm_id"],
-            prev_osm,
-            coords,
-            highway,
-            rc,
-            road.get("name"),
-            road.get("ref"),
-        )
+        record = encode_road(osm_id, prev_osm, coords, highway, rc, name, ref)
         buf.extend(record)
-        prev_osm = road["osm_id"]
+        prev_osm = osm_id
         road_count += 1
 
     # Train dict on sample of this band's data
@@ -292,7 +305,9 @@ def write_ptiles(
     z05_off = z04_off + len(z04_data)
     z07_off = z05_off + len(z05_data)
 
-    total_roads = z04_count  # z04 has all roads (filtered, but the count at z04 is the "full" count)
+    # Z07 is the only unfiltered band (max_road_class=15, epsilon=0), so it
+    # carries the true road total. Z04 is motorway/trunk/primary only.
+    total_roads = z07_count
 
     with open(output_path, "wb") as f:
         # Header
@@ -309,6 +324,11 @@ def write_ptiles(
         struct.pack_into("<I", hdr, 48, len(z07_data))
         struct.pack_into("<I", hdr, 52, z07_decomp)
         struct.pack_into("<I", hdr, 56, total_roads)
+        # Per-band dict lengths -- dicts are concatenated at HEADER_SIZE with no
+        # framing of their own, so a reader cannot split them without these.
+        struct.pack_into("<III", hdr, 60, *(len(d) for d in band_dicts))
+        # Per-band road counts (each band filters differently)
+        struct.pack_into("<III", hdr, 72, z04_count, z05_count, z07_count)
         f.write(hdr)
 
         # Band dictionaries

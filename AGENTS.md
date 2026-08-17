@@ -482,10 +482,44 @@ find a long way whose geometry begins far outside the searched cells.
 readers, built on `MergedBlockReader` in `ptiles/reader.py` — use that base for
 any new layer rather than copying the v2 block-slicing plumbing again.
 
+### Names, and planned semantic search
+
+**One name per feature, nearly everywhere.** Business stores `name` (plus
+`brand`), buildings/trails/rail/parks store `name` only, roads store `name` +
+`ref`. Places is the sole layer with an alternative slot, `alt_name` — and it is
+0.1% populated in the Japan build.
+
+The builders discard the rest. Measured on the Shikoku extract, of 40,858 named
+nodes:
+
+| tag | share of named nodes |
+| --- | --- |
+| `name:en` | 32.3% |
+| `brand` | 4.9% |
+| `name:ja_rm` | 1.3% |
+| `alt_name` | 0.6% |
+| `official_name` | 0.4% |
+| `int_name`, `short_name` | 0.1% each |
+
+So a third of named Japanese features already carry an English name that never
+reaches a file. Capturing `name:en` is the cheap prerequisite for cross-language
+search (居酒屋 ↔ pub) and needs no model — worth doing before anything fancier.
+
+Semantic search (matching "mexican food" to "Taco Bell") is wanted eventually,
+likely MiniLM-class. **Not started, deliberately.** When it happens, embed the
+*category vocabulary* rather than the POIs: ~60M businesses at 384 dims is
+~92 GB, while a few thousand categories is ~6 MB (~1.5 MB int8), and the
+existing spatial index does the filtering. The blocking cost is that clients are
+local-file with no model, so the first step is a precomputed
+`query -> [categories]` table built offline — no runtime dependency. Note the
+category data already exists in `{ST}.business_categories.json`, so that example
+query is answerable exactly without any embedding at all.
+
 ### Known gaps
 
 - `build_business_name_index.py` tokenisation is untested on Japanese, which
-  has no whitespace word breaks; prefix search there is suspect.
+  has no whitespace word breaks; prefix search there is suspect. Category or
+  embedding matching would sidestep tokenisation entirely.
 - The Rust reader downstream still has no PTLR support; only the plan doc.
 
 ## Rust Reader & CLI (downstream repo)

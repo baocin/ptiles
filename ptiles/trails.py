@@ -66,6 +66,14 @@ class Trail:
     # v2 additions. name:en is the valuable one outside the US.
     name_en: str | None = None
     brand: str | None = None
+    park_osm_id: int | None = None
+    """The park this trail *starts* in, when it starts in one.
+
+    A trail can enter and leave a park, so this is a claim about the first
+    vertex, not about the whole way. Computed at build time against the parks
+    layer; None means the first vertex fell outside every park polygon, or that
+    parks were not built when this file was.
+    """
     coords: list[tuple[float, float]] = field(default_factory=list)
     """(lon, lat) pairs. A single pair for a point."""
 
@@ -111,6 +119,7 @@ def decode_trail(data: bytes, pos: int, prev_osm_id: int) -> tuple[Trail, int, i
         pos += n
     # v2: flag-guarded, so a v1 file has the bits clear and needs no branch.
     name_en = brand = None
+    park_osm_id = None
     for _bit, _which in ((0x02, "name_en"), (0x04, "brand")):
         if flags & _bit:
             (n,) = struct.unpack_from("<H", data, pos)
@@ -121,6 +130,9 @@ def decode_trail(data: bytes, pos: int, prev_osm_id: int) -> tuple[Trail, int, i
                 name_en = _val
             else:
                 brand = _val
+    if flags & 0x08:
+        park_osm_id, consumed = decode_varint(data, pos)
+        pos += consumed
 
     first_lon, first_lat = coords[0]
     return (
@@ -135,6 +147,7 @@ def decode_trail(data: bytes, pos: int, prev_osm_id: int) -> tuple[Trail, int, i
             name=name,
             name_en=name_en,
             brand=brand,
+            park_osm_id=park_osm_id,
             coords=coords,
         ),
         pos,

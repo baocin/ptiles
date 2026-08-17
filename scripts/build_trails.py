@@ -30,6 +30,7 @@ from collections import defaultdict
 import h3
 import zstandard as zstd
 
+from encoding import coord_to_micro, micro_to_coord
 from shared import (
     encode_varint,
     zigzag_encode,
@@ -207,6 +208,8 @@ def enc(feat, pid):
         flags |= 0x02
     if feat.get("brand"):
         flags |= 0x04
+    if feat.get("park_osm_id"):
+        flags |= 0x08
     buf.append(flags)
     if feat.get("name"):
         nb = feat["name"].encode("utf-8")
@@ -220,7 +223,72 @@ def enc(feat, pid):
             vb = feat[key].encode("utf-8")
             buf.extend(struct.pack("<H", len(vb)))
             buf.extend(vb)
+    # The park this trail starts inside, when it starts inside one. A trail can
+    # enter and leave a park, so this is a claim about the first vertex, not the
+    # whole way -- see the reader's docstring.
+    if feat.get("park_osm_id"):
+        buf.extend(encode_varint(feat["park_osm_id"]))
     return bytes(buf)
+
+
+
+def load_park_index(abbr):
+    """Grid index of park polygons for a scope, or None when parks are absent.
+
+    Reads the already-built parks file rather than re-extracting polygons from
+    the PBF -- the parks layer has the geometry and is cell-indexed already.
+    That makes this a build-order dependency: parks must be built before trails
+    or the association is simply missing, which is why it says so out loud.
+
+    Keyed by the 0.02-degree cell of every park vertex, so a park is found from
+    anywhere it reaches rather than only from where its first vertex sits.
+    """
+    import glob
+
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    try:
+        from ptiles.parks import ParkReader
+    except Exception as e:
+        print(f"  parks: reader unavailable ({e}); trails will carry no park id",
+              flush=True)
+        return None
+
+    found = sorted(glob.glob(str(OUTPUT_DIR / f"{abbr}.parks_v*.ptiles")))
+    if not found:
+        print(f"  parks: no {abbr}.parks_*.ptiles built yet; trails will carry "
+              f"no park id (build parks first)", flush=True)
+        return None
+
+    reader = ParkReader.open(found[-1])
+    grid = {}
+    count = 0
+    for entry in reader._index:
+        for park in reader.get_in_cell(entry["h3_cell"]):
+            if not park.coords or len(park.coords) < 3:
+                continue
+            ring = tuple(park.coords)
+            count += 1
+            keys = {
+                (int(lon * 50), int(lat * 50))  # 0.02 deg buckets
+                for lon, lat in ring
+            }
+            for key in keys:
+                grid.setdefault(key, []).append((park.osm_id, ring))
+    print(f"  parks: indexed {count} polygons from {Path(found[-1]).name}",
+          flush=True)
+    return grid
+
+
+def park_containing(grid, lon, lat):
+    """osm_id of the park whose polygon contains this point, or None."""
+    if not grid:
+        return None
+    from ptiles.geometry import point_in_polygon
+
+    for osm_id, ring in grid.get((int(lon * 50), int(lat * 50)), ()):
+        if point_in_polygon(lon, lat, ring):
+            return osm_id
+    return None
 
 
 def build_state(abbr):
@@ -235,6 +303,30 @@ def build_state(abbr):
     features = extract(str(pbfp))
     if not features:
         return {"abbr": abbr, "features": 0, "time_s": round(time.time() - t0, 1)}
+
+    # Which park each trail starts in. Answerable at runtime by testing the
+    # parks layer, but storing it means a client asking "is this trail in a
+    # park" does not have to hold parks open at all.
+    park_grid = load_park_index(abbr)
+    if park_grid:
+        tagged = 0
+        for feat in features:
+            coords = feat.get("coords") or []
+            if not coords:
+                continue
+            # Test the coordinates that will actually be stored, not the raw
+            # ones: geometry is quantised to 1e5 on write, and a first vertex
+            # within ~1 m of a park edge otherwise lands inside at build time
+            # and outside at read time. Same trap as the H3 cell assignment in
+            # build_state_v8.
+            _lon = micro_to_coord(coord_to_micro(coords[0][0]))
+            _lat = micro_to_coord(coord_to_micro(coords[0][1]))
+            pid = park_containing(park_grid, _lon, _lat)
+            if pid:
+                feat["park_osm_id"] = pid
+                tagged += 1
+        print(f"  parks: {tagged} of {len(features)} trails start inside a park",
+              flush=True)
 
     pc = defaultdict(list)
     for f in features:

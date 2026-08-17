@@ -183,3 +183,62 @@ def test_client_finds_v2_files():
         aliases = LAYER_FILE_ALIASES[layer]
         assert aliases[0] == f"{layer}_v2", aliases
         assert f"{layer}_v1" in aliases, aliases
+
+
+# --- trails -> parks ------------------------------------------------------
+
+
+def test_trail_park_ids_agree_with_the_parks_layer():
+    """The stored id must match what a runtime point-in-polygon would find.
+
+    It did not at first: the build tested the raw OSM coordinate while the file
+    stores it quantised to 1e5, so a trail starting within ~1 m of a park edge
+    landed inside at build time and outside at read time -- 27 of 3739
+    disagreed. The build now tests the coordinate it is about to write.
+    """
+    from ptiles.geometry import point_in_polygon
+    from ptiles.parks import ParkReader
+    from ptiles.trails import TrailsReader
+
+    tp = newest("states/JP-SHIKOKU.trails_v*.ptiles")
+    pp = newest("states/JP-SHIKOKU.parks_v*.ptiles")
+    if tp is None or pp is None:
+        pytest.skip("trails or parks not built for Shikoku")
+
+    parks = {
+        p.osm_id: tuple(p.coords)
+        for e in ParkReader.open(pp)._index
+        for p in ParkReader.open(pp).get_in_cell(e["h3_cell"])
+        if p.coords
+    }
+    reader = TrailsReader.open(tp)
+    tagged = confirmed = 0
+    for entry in reader._index:
+        for t in reader.get_in_cell(entry["h3_cell"]):
+            if not t.park_osm_id:
+                continue
+            tagged += 1
+            ring = parks.get(t.park_osm_id)
+            if ring and point_in_polygon(t.coords[0][0], t.coords[0][1], ring):
+                confirmed += 1
+    assert tagged, "expected some trails to start inside a park"
+    assert confirmed == tagged, f"{tagged - confirmed} of {tagged} did not agree"
+
+
+def test_most_trails_are_not_in_a_park():
+    """Sanity on the join: a footpath is usually just a footpath. If everything
+    or nothing were tagged, the containment test would be the suspect."""
+    from ptiles.trails import TrailsReader
+
+    tp = newest("states/JP-SHIKOKU.trails_v*.ptiles")
+    if tp is None:
+        pytest.skip("trails not built")
+    reader = TrailsReader.open(tp)
+    total = tagged = 0
+    for entry in reader._index:
+        for t in reader.get_in_cell(entry["h3_cell"]):
+            total += 1
+            if t.park_osm_id:
+                tagged += 1
+    assert total
+    assert 0 < tagged < total * 0.5, f"{tagged} of {total} trails tagged"

@@ -18,13 +18,27 @@ the page can ship with itself instead of fetching 28 MB.
         --index-html ../ptile-client/web-demo/index.html \\
         --out ../ptile-client/web-demo/lib/state_cells.bin
 
+A res-7 cell is about 5 km across, so a town within a couple of kilometres of
+the line sits in a cell the grid assigns to its neighbour -- Southaven,
+Jeffersonville, Evansville and El Paso all still routed wrong on the res-7
+table alone. For the cells the admin build flagged as straddling a state edge,
+the res-9 children (~180 m across) are resolved against the Census state
+polygons and written as a second section, so the answer is right to a couple of
+hundred metres along every border.
+
 Format (little-endian):
 
     magic   "PSCI"          4 bytes
-    version 1               u8
+    version 2               u8
     nstates                 u8      state codes, 2 ASCII bytes each
-    count                   u32     entries, ascending by cell
+    count7                  u32     res-7 entries, ascending by cell
+    count9                  u32     res-9 entries, ascending by cell
     entries                 varint(cell - previous cell), u8 state index
+                            count7 of them, then count9 of them
+
+Only res-9 children whose state differs from their res-7 parent are written:
+the rest are already answered by the coarse section, and storing them would
+multiply the table by 49 to say nothing new.
 
 Cells are written with the low 21 filler bits cleared, the same normalisation
 ptiles_core::normalize_cell applies, so a lookup keyed on a masked cell hits.
@@ -82,6 +96,105 @@ def parse_state_bbox(index_html: str) -> dict:
     return out
 
 
+STRADDLE_STATE = 0x01  # build_admin.py's boundary_flags bit for a state edge
+
+
+def refine_border_cells(raw, cells, state_idx, names, boxes, args):
+    """res-9 answers for the cells that straddle a state line.
+
+    The res-7 grid is the wrong resolution for a border town: a cell is ~5 km
+    across, so Southaven, Jeffersonville, Evansville and El Paso all sit in a
+    cell the grid hands to the neighbouring state, and the file that answers has
+    none of their ground. The admin build already flags which cells straddle an
+    edge, so only those are refined -- ~180 m children, resolved against the
+    same Census polygons the admin layer was built from.
+
+    Only children that disagree with their parent are returned. The rest add
+    49x the entries to repeat what the coarse section already says.
+    """
+    import geopandas as gpd
+    import h3
+    import numpy as np
+    import shapely
+
+    if not os.path.exists(args.states_shp):
+        print(f"  no state polygons at {args.states_shp}; skipping refinement")
+        return []
+
+    flags = raw[:, 15]
+    border = np.flatnonzero((flags & STRADDLE_STATE) != 0)
+    if not len(border):
+        # This admin build left boundary_flags at zero (build_admin.py sets them
+        # in a pass that clearly did not run for this file). The grid itself
+        # still says where the edges are: a cell whose res-7 neighbour belongs
+        # to another state is on one.
+        print("  boundary_flags are all zero; finding edges from the grid",
+              flush=True)
+        owner = {}
+        for i in range(len(cells)):
+            owner[int(cells[i])] = int(state_idx[i])
+        found = []
+        for i in range(len(cells)):
+            mine = int(state_idx[i])
+            if not names[mine]:
+                continue
+            try:
+                ring = h3.grid_disk(format(int(cells[i]), "x"), 1)
+            except Exception:
+                continue
+            for c in ring:
+                other = owner.get(int(c, 16))
+                if other is not None and other != mine and names[other]:
+                    found.append(i)
+                    break
+            if len(found) % 20_000 == 0 and found and found[-1] == i:
+                print(f"  edges {len(found):,} (scanned {i:,}/{len(cells):,})",
+                      flush=True)
+        border = np.array(found, dtype=np.int64)
+    print(f"{len(border):,} cells straddle a state line", flush=True)
+    if not len(border):
+        return []
+
+    gdf = gpd.read_file(args.states_shp)
+    gdf = gdf[gdf["STUSPS"].isin(boxes)]
+    geoms = list(gdf.geometry.values)
+    owners = list(gdf["STUSPS"].values)
+    tree = shapely.STRtree(geoms)
+
+    kids, parent_state = [], []
+    for i in border.tolist():
+        parent = format(int(cells[i]), "x")
+        try:
+            children = h3.cell_to_children(parent, 9)
+        except Exception:
+            continue
+        kids.extend(children)
+        parent_state.extend([names[int(state_idx[i])]] * len(children))
+    print(f"  {len(kids):,} res-9 children to place", flush=True)
+
+    lat = np.empty(len(kids)); lon = np.empty(len(kids))
+    for j, c in enumerate(kids):
+        ll = h3.cell_to_latlng(c)
+        lat[j], lon[j] = ll[0], ll[1]
+        if j and j % 500_000 == 0:
+            print(f"  centres {j:,}/{len(kids):,}", flush=True)
+
+    pts = shapely.points(lon, lat)
+    # `within` rather than nearest: a child centre in the sea or over the border
+    # into Canada belongs to nobody, and inventing an owner for it would route
+    # the map to a file that does not hold it.
+    child_i, geom_i = tree.query(pts, predicate="within")
+    out = []
+    for ci, gi in zip(child_i.tolist(), geom_i.tolist()):
+        owner = owners[gi]
+        if owner == parent_state[ci] or owner not in boxes:
+            continue
+        out.append((int(kids[ci], 16), owner))
+    out.sort()
+    print(f"  {len(out):,} children disagree with their parent")
+    return out
+
+
 def varint(n: int) -> bytes:
     out = bytearray()
     while n >= 0x80:
@@ -100,6 +213,11 @@ def main():
                     default="/home/aoi/kino/projects/ptile-client/web-demo/lib/state_cells.bin")
     ap.add_argument("--all", action="store_true",
                     help="write every cell, not just the ones in two or more boxes")
+    ap.add_argument("--no-refine", action="store_true",
+                    help="skip the res-9 border pass (coarse cells only)")
+    ap.add_argument("--states-shp",
+                    default="/mnt/core/timeline-ptiles-cache/admin_data/states/"
+                            "cb_2023_us_state_500k.shp")
     args = ap.parse_args()
 
     import h3
@@ -168,56 +286,92 @@ def main():
     masked = masked[order]
     picked = state_idx[idx][order]
 
-    body = bytearray()
-    prev = 0
-    written = 0
-    for cell, si in zip(masked.tolist(), picked.tolist()):
-        # Masking collapses neighbouring entries onto the same key only if the
-        # grid ever held two cells in one res-7 parent, which it does not --
-        # but if it did, the first wins and the rest are noise.
-        if cell == prev and written:
-            continue
-        body += varint(cell - prev)
-        body.append(code_pos[names[si]])
-        prev = cell
-        written += 1
+    def encode(pairs):
+        """(cell, state code) ascending -> delta-coded bytes, and how many."""
+        buf, prev, n = bytearray(), 0, 0
+        for cell, code in pairs:
+            # Two entries on one key can only happen if the grid held two cells
+            # under one parent, which it does not -- but if it did, the first
+            # wins and the rest are noise.
+            if cell == prev and n:
+                continue
+            buf += varint(cell - prev)
+            buf.append(code_pos[code])
+            prev = cell
+            n += 1
+        return bytes(buf), n
+
+    coarse, written = encode(
+        (c, names[s]) for c, s in zip(masked.tolist(), picked.tolist()))
+
+    fine, fine_written = b"", 0
+    if not args.no_refine:
+        fine_pairs = refine_border_cells(raw, cells, state_idx, names, boxes, args)
+        for _, code in fine_pairs:
+            if code not in code_pos:
+                code_pos[code] = len(codes)
+                codes.append(code)
+        fine, fine_written = encode(fine_pairs)
 
     out = bytearray(b"PSCI")
-    out.append(1)
+    out.append(2)
     out.append(len(codes))
     for c in codes:
         out += c.encode("ascii")
     out += struct.pack("<I", written)
-    out += body
+    out += struct.pack("<I", fine_written)
+    out += coarse
+    out += fine
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "wb") as f:
         f.write(out)
-    print(f"wrote {args.out}: {written:,} cells, {len(out) / 1024:.0f} KiB, "
-          f"{len(codes)} states")
+    print(f"wrote {args.out}: {written:,} res-7 cells, {fine_written:,} res-9 cells, "
+          f"{len(out) / 1024:.0f} KiB, {len(codes)} states")
 
-    # Self-check: decode what was just written and compare against the grid.
-    seen = {}
-    pos = 6 + 2 * len(codes) + 4
-    cell = 0
-    for _ in range(written):
-        shift, delta = 0, 0
-        while True:
-            b = out[pos]; pos += 1
-            delta |= (b & 0x7F) << shift
-            if b < 0x80:
-                break
-            shift += 7
-        cell += delta
-        seen[cell] = codes[out[pos]]; pos += 1
+    # Self-check: decode what was just written, the way the page will, and put
+    # known points through it. A table that only round-trips its own encoder
+    # would still be wrong about the ground.
+    pos = 6 + 2 * len(codes) + 8
+
+    def read_section(n):
+        nonlocal pos
+        got, cell = {}, 0
+        for _ in range(n):
+            shift, delta = 0, 0
+            while True:
+                b = out[pos]; pos += 1
+                delta |= (b & 0x7F) << shift
+                if b < 0x80:
+                    break
+                shift += 7
+            cell += delta
+            got[cell] = codes[out[pos]]; pos += 1
+        return got
+
+    coarse_map = read_section(written)
+    fine_map = read_section(fine_written)
     assert pos == len(out), f"decoder consumed {pos} of {len(out)} bytes"
-    assert len(seen) == written
-    for probe, want in [((40.7580, -73.9855), "NY"), ((36.1627, -86.7816), "TN"),
-                        ((31.7619, -106.4850), "TX"), ((39.5296, -119.8138), "NV")]:
-        key = int(h3.latlng_to_cell(probe[0], probe[1], 7), 16) & ~CELL_FILLER_BITS
-        got = seen.get(key)
-        print(f"  {probe} -> {got} (expected {want})"
-              + ("" if got == want else "   MISMATCH"))
+    assert len(coarse_map) == written and len(fine_map) == fine_written
+
+    bad = 0
+    for probe, want in [((40.7580, -73.9855), "NY"),   # Manhattan, inside NJ's box
+                        ((31.7619, -106.4850), "TX"),  # El Paso, a mile from NM
+                        ((39.5296, -119.8138), "NV"),  # Reno, inside CA's box
+                        ((34.9890, -89.9873), "MS"),   # Southaven, 2 km from TN
+                        ((38.2775, -85.7372), "IN"),   # Jeffersonville, over the river
+                        ((37.9716, -87.5711), "IN"),   # Evansville, likewise
+                        ((36.1627, -86.7816), None)]:  # Nashville: one box, not in table
+        fine = fine_map.get(int(h3.latlng_to_cell(probe[0], probe[1], 9), 16))
+        coarse = coarse_map.get(
+            int(h3.latlng_to_cell(probe[0], probe[1], 7), 16) & ~CELL_FILLER_BITS)
+        got = fine or coarse
+        ok = got == want
+        bad += 0 if ok else 1
+        print(f"  {probe} -> {got} (res9 {fine}, res7 {coarse}; expected {want})"
+              + ("" if ok else "   MISMATCH"))
+    if bad:
+        raise SystemExit(f"{bad} probe(s) wrong -- not writing this off as noise")
 
 
 if __name__ == "__main__":

@@ -247,6 +247,50 @@ https://maps.mydatatimeline.com/maps/2026-08-07/{ST}.{layer}.ptiles
 merged-block index, so a reader must slice its cell out of a block before
 handing the bytes to a record decoder.
 
+### Snapshot layout, and countries other than the US
+
+A snapshot keeps the US at its root and gives every other country a directory:
+
+```
+maps/{date}/manifest.json
+maps/{date}/{ST}.{layer}.ptiles              # US, unchanged
+maps/{date}/{COUNTRY}/{SCOPE}.{layer}.ptiles # everything else
+```
+
+```
+maps/2026-08-20/TN.buildings_v9.ptiles
+maps/2026-08-20/JP/JP.places_v1.ptiles
+maps/2026-08-20/JP/JP-KANTO.buildings_v9.ptiles
+```
+
+The US stays at the root because those URLs are already published and read by
+clients outside this repo; moving them would break consumers we cannot test.
+
+A *scope* is the filename prefix — the area one file covers. A bare two-letter
+scope is a US state (`TN`), since the US set owns the unprefixed namespace; any
+other country is named directly (`JP`), and a country too large for one file per
+layer is split by subdivision (`JP-KANTO`). Note the consequence: a country
+whose ISO code collides with a state abbreviation (`DE`, `CA`, `IN`) cannot use
+a bare scope and must be published by subdivision.
+
+Granularity varies **per layer**: Japan's buildings are eight regional files
+(29.5M buildings do not fit one build) while its places, water and rail are one
+country-wide file each. Clients should not assume one file per layer — read
+`manifest.json`, which lists every scope, its version, its `path` within the
+snapshot, and its `bounds`:
+
+```bash
+curl -s https://maps.mydatatimeline.com/maps/2026-08-20/manifest.json | jq '.countries'
+# { "JP": ["JP", "JP-KANTO", ...], "US": ["AK", "AL", ...] }
+```
+
+Roads files are PTLR, which stores no bounding box, so their manifest `bounds`
+is `null` and a client must consult them rather than filter them out.
+
+Publish a build with `scripts/publish_snapshot.py <build_dir> <date> <source>`;
+`--dry-run` prints the keys first. It generates the manifest from the same tree
+and refuses to upload if the two disagree.
+
 ## Building
 
 Build scripts in `scripts/`:

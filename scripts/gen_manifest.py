@@ -20,26 +20,73 @@ the previous vintage rather than dropping the layer. The entry is marked
 import argparse
 import json
 import re
+import struct
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from ptiles.codec import read_header
+from ptiles.scopes import country_of, publish_relpath
 
-FILE_RE = re.compile(r"^(?P<scope>[A-Z]{2})\.(?P<layer>[a-z_]+?)(?:_v(?P<ver>\d+))?\.ptiles$")
+# Scope is a country/state code with an optional subdivision, so that a country
+# split across several files (JP-KANTO, JP-KANSAI) is expressible. This used to
+# be [A-Z]{2}, which skipped every such file with only a note on stderr.
+FILE_RE = re.compile(
+    r"^(?P<scope>[A-Z]{2}(?:-[A-Z0-9]+)?)\.(?P<layer>[a-z_]+?)(?:_v(?P<ver>\d+))?\.ptiles$"
+)
 
 
-def describe(path):
-    with open(path, "rb") as f:
-        h = read_header(f)
+def _describe_ptlr(path):
+    """Metadata for a PTLR roads file.
+
+    PTLR is a different container from the H3-block layers: 256-byte header,
+    three zoom-band ZSTD frames, no spatial index and -- importantly -- no
+    bounding box. read_header() does not reject it, it reads PTLR's bytes
+    through the PTILES field layout, which yielded a feature count of
+    471450137651052544 and bounds of ~1e-39 for every roads file published so
+    far. Parse the real fields instead, and report bounds as null rather than
+    inventing them.
+    """
+    data = path.read_bytes()[:80]
+    version = data[4]
+    road_count = struct.unpack_from("<I", data, 56)[0]
+    out = {
+        "format": "PTLR",
+        "format_version": version,
+        "features": road_count,
+        "blocks": 3,  # the three zoom bands
+        "bounds": None,  # PTLR stores none; a client must not filter on it
+    }
+    if version < 2:
+        # v1 wrote the Z04 count (motorway/trunk/primary only) into the total
+        # field, so this undercounts the file by roughly 95%. Say so rather than
+        # publishing it as the road total.
+        out["features_partial"] = "z04_only"
+    return out
+
+
+def describe(path, scope):
+    head = path.read_bytes()[:4]
+    if head == b"PTLR":
+        detail = _describe_ptlr(path)
+    else:
+        with open(path, "rb") as f:
+            h = read_header(f)
+        detail = {
+            "features": h["feature_count"],
+            "blocks": h["block_count"],
+            "bounds": [
+                round(h["min_lat"], 6), round(h["min_lon"], 6),
+                round(h["max_lat"], 6), round(h["max_lon"], 6),
+            ],
+        }
     return {
+        "country": country_of(scope),
+        # Where this file sits inside the published snapshot. The client joins
+        # it onto the snapshot URL rather than reconstructing the layout rule.
+        "path": publish_relpath(scope, path.name),
         "bytes": path.stat().st_size,
-        "features": h["feature_count"],
-        "blocks": h["block_count"],
-        "bounds": [
-            round(h["min_lat"], 6), round(h["min_lon"], 6),
-            round(h["max_lat"], 6), round(h["max_lon"], 6),
-        ],
+        **detail,
     }
 
 
@@ -60,8 +107,12 @@ def main():
     for path in sorted(build_dir.rglob("*.ptiles")):
         m = FILE_RE.match(path.name)
         if not m:
-            print(f"skipping unrecognised name: {path.name}", file=sys.stderr)
-            continue
+            # Fatal, not a warning. A skipped file is absent from the manifest,
+            # so the deploy publishes a snapshot missing a layer and every step
+            # still reports success -- which is how a whole country's buildings
+            # went unnoticed.
+            print(f"FATAL: unrecognised .ptiles name: {path.name}", file=sys.stderr)
+            sys.exit(1)
         layer = m["layer"]
         entry = layers.setdefault(
             layer, {"version": int(m["ver"]) if m["ver"] else None, "scopes": {}}
@@ -71,7 +122,7 @@ def main():
             # name unpredictable from the manifest, which is the whole point.
             print(f"FATAL: {layer} has mixed versions in this build", file=sys.stderr)
             sys.exit(1)
-        entry["scopes"][m["scope"]] = describe(path)
+        entry["scopes"][m["scope"]] = describe(path, m["scope"])
 
     # Layers carried forward from an earlier build, served by this snapshot but
     # not produced by it.
@@ -91,19 +142,36 @@ def main():
         if note:
             entry["note"] = note
         for f in sorted(src.glob("*.ptiles")):
-            scope = f.name.split(".")[0]
-            entry["scopes"][scope] = describe(f)
+            cm = FILE_RE.match(f.name)
+            if not cm:
+                # Carried files used to bypass FILE_RE entirely by splitting on
+                # the first dot, so a malformed name reached the manifest.
+                print(f"FATAL: unrecognised carried name: {f.name}", file=sys.stderr)
+                sys.exit(1)
+            entry["scopes"][cm["scope"]] = describe(f, cm["scope"])
 
     for layer, entry in layers.items():
         v = entry["version"]
+        # Kept for older clients. `pattern` cannot express the published layout
+        # (US at the snapshot root, other countries under a country directory),
+        # so a client that can should join each scope's own `path` instead.
         entry["pattern"] = f"{{scope}}.{layer}_v{v}.ptiles" if v else f"{{scope}}.{layer}.ptiles"
         entry["count"] = len(entry["scopes"])
         entry["bytes"] = sum(s["bytes"] for s in entry["scopes"].values())
+        entry["countries"] = sorted({s["country"] for s in entry["scopes"].values()})
+
+    # country -> scopes, so a client can open "everything for Japan" without
+    # having to know that JP buildings are regional and JP places are not.
+    countries: dict[str, set] = {}
+    for entry in layers.values():
+        for scope, s in entry["scopes"].items():
+            countries.setdefault(s["country"], set()).add(scope)
 
     json.dump(
         {
             "built": built,
             "source": source,
+            "countries": {c: sorted(s) for c, s in sorted(countries.items())},
             "layers": dict(sorted(layers.items())),
             "total_bytes": sum(e["bytes"] for e in layers.values()),
         },

@@ -406,15 +406,40 @@ Dictionary training reduces block size by ~30%.
 
 ## R2 Upload
 
-Upload built `.ptiles` files to Cloudflare R2 for app consumption:
+Publish a whole build as a dated snapshot, with its manifest:
+
+```bash
+python3 scripts/publish_snapshot.py <build_dir> 2026-08-20 osm-2026-08-07 --dry-run
+python3 scripts/publish_snapshot.py <build_dir> 2026-08-20 osm-2026-08-07
+```
+
+It derives every key from `ptiles.scopes.publish_relpath`, generates the
+manifest from the same tree, and refuses to upload if the two disagree — a file
+uploaded but missing from the manifest is invisible to clients.
+
+**Layout:** the US stays at the snapshot root (those URLs are already published
+and read by clients outside this repo); every other country gets a directory.
+
+```
+maps/2026-08-20/manifest.json
+maps/2026-08-20/TN.buildings_v9.ptiles
+maps/2026-08-20/JP/JP-KANTO.buildings_v9.ptiles
+```
+
+Single-file uploads still work, but the key must carry the same layout:
 
 ```bash
 AWS_PROFILE=mdt-r2 aws s3 cp data/states/TN.buildings_v8.ptiles \
-    s3://mydatatimeline/maps/TN.buildings_v8.ptiles
+    s3://mydatatimeline/maps/2026-08-20/TN.buildings_v8.ptiles
 ```
 
 **Profile:** `mdt-r2` (configured in `~/.aws/config` and `~/.aws/credentials`)
 **Bucket:** `mydatatimeline` (contains `downloads/`, `maps/`, `models/`)
+
+**Scopes:** a bare two-letter scope is a US state; other countries are named
+directly (`JP`) and split by subdivision when a layer will not fit one file
+(`JP-KANTO`). Granularity varies per layer, so clients must read `manifest.json`
+rather than assume one file per layer. See `ptiles/scopes.py`.
 
 ## Free-Space Guide
 

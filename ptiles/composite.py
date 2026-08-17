@@ -29,6 +29,12 @@ from ptiles.water import WaterFeature, WaterReader
 
 logger = logging.getLogger("ptiles.composite")
 
+# Point queries answer with the *nearest* feature, which can sit outside the
+# file's own bbox when the point is near an edge, so the bounds filter is padded
+# rather than exact. ~0.05 deg is about 5.5km -- wider than any nearest-feature
+# search radius the layers use.
+NEIGHBOUR_PAD_DEG = 0.05
+
 
 @dataclass
 class PointReport:
@@ -92,35 +98,96 @@ class Layer(Protocol):
 # --- Adapters wrapping each reader as a Layer ---
 
 
-class BuildingLayer:
-    def __init__(self, path):
-        self._reader = BuildingsReader.open(path)
+class _LayerBase:
+    """Shared bounds test and cleanup for the adapters.
 
-    def query_point(self, lat, lon, report, **kw):
-        try:
-            report.building = self._reader.query(lat, lon)
-        except Exception as e:
-            logger.warning("Buildings query failed: %s", e)
+    One layer can be backed by several files. Japan's buildings are eight
+    regional files because 29.5M buildings do not fit a single build, while its
+    other layers are country-wide -- so a client holding "Japan" holds eight
+    BuildingLayer instances and one PlaceLayer.
 
-    def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
+    That makes bounds a correctness concern, not just a speed one. Adapters
+    write their answers into a shared report, so a file that does not contain
+    the query point must be skipped rather than allowed to write its empty
+    answer over a real one.
+    """
+
+    _reader = None
+    _scope = None
+
+    @property
+    def scope(self):
+        """Which scope this file covers, e.g. 'TN' or 'JP-KANTO'."""
+        return self._scope
+
+    @property
+    def bounds(self):
+        """(min_lat, min_lon, max_lat, max_lon), or None when unknown.
+
+        PTLR roads files carry no bbox, so they answer None and are always
+        consulted.
+        """
         try:
-            report.buildings = self._reader.get_in_bounds(
-                min_lat, min_lon, max_lat, max_lon, limit=limit
-            )
-        except Exception as e:
-            logger.warning("Corridor buildings failed: %s", e)
+            h = self._reader.header
+            return (h["min_lat"], h["min_lon"], h["max_lat"], h["max_lon"])
+        except Exception:
+            return None
+
+    def covers(self, lat, lon, pad=0.0):
+        b = self.bounds
+        if b is None:
+            return True
+        s, w, n, e = b
+        return (s - pad) <= lat <= (n + pad) and (w - pad) <= lon <= (e + pad)
+
+    def intersects(self, min_lat, min_lon, max_lat, max_lon):
+        b = self.bounds
+        if b is None:
+            return True
+        s, w, n, e = b
+        return not (max_lat < s or min_lat > n or max_lon < w or min_lon > e)
 
     def close(self):
         self._reader.close()
 
 
-class AdminLayer:
-    def __init__(self, path):
-        self._reader = AdminReader.open(path)
+class BuildingLayer(_LayerBase):
+    def __init__(self, path, scope=None):
+        self._reader = BuildingsReader.open(path)
+        self._scope = scope
 
     def query_point(self, lat, lon, report, **kw):
         try:
-            report.admin = self._reader.query(lat, lon)
+            hit = self._reader.query(lat, lon)
+            # Only a hit may overwrite. Region extracts overlap at their seams,
+            # so two files can legitimately answer for one point and the misses
+            # must not erase the hit.
+            if hit is not None:
+                report.building = hit
+        except Exception as e:
+            logger.warning("Buildings query failed: %s", e)
+
+    def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
+        try:
+            report.buildings.extend(
+                self._reader.get_in_bounds(
+                    min_lat, min_lon, max_lat, max_lon, limit=limit
+                )
+            )
+        except Exception as e:
+            logger.warning("Corridor buildings failed: %s", e)
+
+
+class AdminLayer(_LayerBase):
+    def __init__(self, path, scope=None):
+        self._reader = AdminReader.open(path)
+        self._scope = scope
+
+    def query_point(self, lat, lon, report, **kw):
+        try:
+            hit = self._reader.query(lat, lon)
+            if hit is not None:
+                report.admin = hit
         except Exception as e:
             logger.warning("Admin query failed: %s", e)
 
@@ -134,22 +201,30 @@ class AdminLayer:
         self._reader.close()
 
 
-class RoadLayer:
-    def __init__(self, path):
+class RoadLayer(_LayerBase):
+    def __init__(self, path, scope=None):
         self._reader = RoadsReader.open(path)
+        self._scope = scope
 
     def query_point(self, lat, lon, report, **kw):
         try:
-            report.nearest_road = self._reader.nearest(lat, lon)
-            report.nearby_roads = self._reader.nearest_n(lat, lon, n=5)
+            near = self._reader.nearest(lat, lon)
+            # Keep the closest across files, not the last file's answer.
+            if near is not None and (
+                report.nearest_road is None
+                or getattr(near, 'distance_meters', float('inf'))
+                < getattr(report.nearest_road, 'distance_meters', float('inf'))
+            ):
+                report.nearest_road = near
+            report.nearby_roads.extend(self._reader.nearest_n(lat, lon, n=5))
         except Exception as e:
             logger.warning("Roads nearest query failed: %s", e)
 
     def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
         try:
-            report.roads = self._reader.get_in_bounds(
+            report.roads.extend(self._reader.get_in_bounds(
                 min_lat, min_lon, max_lat, max_lon, limit=limit
-            )
+            ))
         except Exception as e:
             logger.warning("Corridor roads failed: %s", e)
 
@@ -157,24 +232,25 @@ class RoadLayer:
         self._reader.close()
 
 
-class WaterLayer:
-    def __init__(self, path):
+class WaterLayer(_LayerBase):
+    def __init__(self, path, scope=None):
         self._reader = WaterReader.open(path)
+        self._scope = scope
 
     def query_point(self, lat, lon, report, **kw):
         try:
             import h3
 
             cell = int(h3.latlng_to_cell(lat, lon, 7), 16)
-            report.water = self._reader.get_in_cell(cell)
+            report.water.extend(self._reader.get_in_cell(cell))
         except Exception as e:
             logger.warning("Water query failed: %s", e)
 
     def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
         try:
-            report.water = self._reader.get_in_bounds(
+            report.water.extend(self._reader.get_in_bounds(
                 min_lat, min_lon, max_lat, max_lon, limit=limit
-            )
+            ))
         except Exception as e:
             logger.warning("Corridor water failed: %s", e)
 
@@ -182,24 +258,25 @@ class WaterLayer:
         self._reader.close()
 
 
-class ParkLayer:
-    def __init__(self, path):
+class ParkLayer(_LayerBase):
+    def __init__(self, path, scope=None):
         self._reader = ParkReader.open(path)
+        self._scope = scope
 
     def query_point(self, lat, lon, report, **kw):
         try:
             import h3
 
             cell = int(h3.latlng_to_cell(lat, lon, 7), 16)
-            report.parks = self._reader.get_in_cell(cell)
+            report.parks.extend(self._reader.get_in_cell(cell))
         except Exception as e:
             logger.warning("Parks query failed: %s", e)
 
     def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
         try:
-            report.parks = self._reader.get_in_bounds(
+            report.parks.extend(self._reader.get_in_bounds(
                 min_lat, min_lon, max_lat, max_lon, limit=limit
-            )
+            ))
         except Exception as e:
             logger.warning("Corridor parks failed: %s", e)
 
@@ -207,24 +284,25 @@ class ParkLayer:
         self._reader.close()
 
 
-class RailLayer:
-    def __init__(self, path):
+class RailLayer(_LayerBase):
+    def __init__(self, path, scope=None):
         self._reader = RailReader.open(path)
+        self._scope = scope
 
     def query_point(self, lat, lon, report, **kw):
         try:
             import h3
 
             cell = int(h3.latlng_to_cell(lat, lon, 7), 16)
-            report.rail = self._reader.get_in_cell(cell)
+            report.rail.extend(self._reader.get_in_cell(cell))
         except Exception as e:
             logger.warning("Rail query failed: %s", e)
 
     def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
         try:
-            report.rail = self._reader.get_in_bounds(
+            report.rail.extend(self._reader.get_in_bounds(
                 min_lat, min_lon, max_lat, max_lon, limit=limit
-            )
+            ))
         except Exception as e:
             logger.warning("Corridor rail failed: %s", e)
 
@@ -232,23 +310,24 @@ class RailLayer:
         self._reader.close()
 
 
-class PlaceLayer:
-    def __init__(self, path):
+class PlaceLayer(_LayerBase):
+    def __init__(self, path, scope=None):
         self._reader = PlacesReader.open(path)
+        self._scope = scope
 
     def query_point(self, lat, lon, report, **kw):
         try:
-            report.places = self._reader.get_in_bounds(
+            report.places.extend(self._reader.get_in_bounds(
                 lat - 0.05, lon - 0.05, lat + 0.05, lon + 0.05, limit=20
-            )
+            ))
         except Exception as e:
             logger.warning("Places query failed: %s", e)
 
     def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
         try:
-            report.places = self._reader.get_in_bounds(
+            report.places.extend(self._reader.get_in_bounds(
                 min_lat, min_lon, max_lat, max_lon, limit=limit
-            )
+            ))
         except Exception as e:
             logger.warning("Corridor places failed: %s", e)
 
@@ -256,29 +335,30 @@ class PlaceLayer:
         self._reader.close()
 
 
-class CameraLayer:
-    def __init__(self, path):
+class CameraLayer(_LayerBase):
+    def __init__(self, path, scope=None):
         self._reader = CameraReader.open(path)
+        self._scope = scope
 
     def query_point(self, lat, lon, report, **kw):
         try:
             from ptiles.visibility import cameras_near, cameras_seeing
 
             radius = kw.get("camera_radius_meters", 200)
-            report.cameras = [s.camera for s in
-                              cameras_near(lat, lon, self._reader, max_meters=radius)]
-            report.cameras_seeing = cameras_seeing(
+            report.cameras.extend(s.camera for s in
+                                  cameras_near(lat, lon, self._reader, max_meters=radius))
+            report.cameras_seeing.extend(cameras_seeing(
                 lat, lon, self._reader,
                 buildings=kw.get("buildings_reader"),
-            )
+            ))
         except Exception as e:
             logger.warning("Camera query failed: %s", e)
 
     def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
         try:
-            report.cameras = self._reader.get_in_bounds(
+            report.cameras.extend(self._reader.get_in_bounds(
                 min_lat, min_lon, max_lat, max_lon, limit=limit
-            )
+            ))
         except Exception as e:
             logger.warning("Corridor camera failed: %s", e)
 
@@ -286,9 +366,10 @@ class CameraLayer:
         self._reader.close()
 
 
-class SignalLayer:
-    def __init__(self, path):
+class SignalLayer(_LayerBase):
+    def __init__(self, path, scope=None):
         self._reader = SignalsReader.open(path)
+        self._scope = scope
 
     def query_point(self, lat, lon, report, **kw):
         try:
@@ -296,15 +377,15 @@ class SignalLayer:
 
             found = nearest(self._reader, lat, lon, n=kw.get("signal_limit", 10),
                             max_meters=kw.get("signal_radius_meters", 250))
-            report.signals = [h.feature for h in found]
+            report.signals.extend(h.feature for h in found)
         except Exception as e:
             logger.warning("Signals query failed: %s", e)
 
     def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
         try:
-            report.signals = self._reader.get_in_bounds(
+            report.signals.extend(self._reader.get_in_bounds(
                 min_lat, min_lon, max_lat, max_lon, limit=limit
-            )
+            ))
         except Exception as e:
             logger.warning("Corridor signals failed: %s", e)
 
@@ -312,26 +393,27 @@ class SignalLayer:
         self._reader.close()
 
 
-class BusinessLayer:
-    def __init__(self, path):
+class BusinessLayer(_LayerBase):
+    def __init__(self, path, scope=None):
         self._reader = BusinessReader.open(path)
+        self._scope = scope
 
     def query_point(self, lat, lon, report, **kw):
         try:
-            report.businesses = self._reader.nearby(
+            report.businesses.extend(self._reader.nearby(
                 lat,
                 lon,
                 radius_meters=kw.get("business_radius_meters", 500),
                 limit=kw.get("business_limit", 5),
-            )
+            ))
         except Exception as e:
             logger.warning("Business nearby failed: %s", e)
 
     def query_corridor(self, min_lat, min_lon, max_lat, max_lon, report, limit):
         try:
-            report.business = self._reader.get_in_bounds(
+            report.business.extend(self._reader.get_in_bounds(
                 min_lat, min_lon, max_lat, max_lon, limit=limit
-            )
+            ))
         except Exception as e:
             logger.warning("Corridor business failed: %s", e)
 
@@ -353,13 +435,18 @@ LAYER_CONFIG: list[tuple[str, type, bool, bool]] = [
     ("signals", SignalLayer, True, True),
 ]
 
-# Layers published as one national file rather than per state, so open_state
-# looks for them under US.* instead of <STATE>.*.
-US_WIDE_LAYERS: dict[str, type] = {
+# Layers published as one file for a whole country rather than per subdivision,
+# so they are looked up under the country code -- US.admin.ptiles for a US
+# scope, JP.signals.ptiles for a Japanese one. This used to hardcode the string
+# "US.", which made every non-US country's signals and cameras unreachable.
+COUNTRY_WIDE_LAYERS: dict[str, type] = {
     "admin": AdminLayer,
     "camera": CameraLayer,
     "signals": SignalLayer,
 }
+
+# Kept as an alias: this was the public name before non-US countries existed.
+US_WIDE_LAYERS = COUNTRY_WIDE_LAYERS
 
 # Filename variants seen in the published sets. buildings ship as
 # `<ST>.buildings_v9.ptiles` while LAYER_CONFIG still keys them `buildings_v8`,
@@ -374,6 +461,30 @@ LAYER_FILE_ALIASES: dict[str, tuple[str, ...]] = {
     "parks": ("parks_v1", "parks"),
     "rail": ("rail_v1", "rail"),
 }
+
+
+def _manifest_relpath(scope, layer, entry, meta) -> str | None:
+    """Where a manifest says a file lives, relative to the snapshot root.
+
+    Prefers the recorded `path`. Manifests published before countries existed
+    have no such field, so fall back to the layer's filename `pattern` (or the
+    layer/version) and apply the standard layout rule.
+    """
+    from ptiles.scopes import publish_relpath
+
+    rel = (meta or {}).get("path")
+    if rel:
+        return rel
+    pattern = entry.get("pattern")
+    if pattern:
+        filename = pattern.replace("{scope}", scope)
+    else:
+        version = entry.get("version")
+        filename = f"{scope}.{layer}_v{version}.ptiles" if version else f"{scope}.{layer}.ptiles"
+    try:
+        return publish_relpath(scope, filename)
+    except ValueError:
+        return None
 
 
 class PtilesClient:
@@ -421,50 +532,249 @@ class PtilesClient:
         client._wire_cross_layer()
         return client
 
+    @staticmethod
+    def _find(data_dir: Path, country: str, filename: str) -> Path | None:
+        """Locate a file in a local mirror of a published snapshot.
+
+        Published snapshots keep the US at the root and give every other country
+        its own directory, so try both rather than making callers care.
+        """
+        for candidate in (data_dir / filename, data_dir / country / filename):
+            if candidate.exists():
+                return candidate
+        return None
+
     @classmethod
-    def open_state(cls, state: str, data_dir: str | os.PathLike) -> "PtilesClient":
-        """Open all available <STATE>.<layer>.ptiles files in data_dir."""
-        state_upper = (
-            state.upper()
-            if not state.startswith("US.")
-            else state[:2].upper() + state[2:]
-        )
-        data_dir = Path(data_dir)
+    def open_scope(cls, scope: str, data_dir: str | os.PathLike) -> "PtilesClient":
+        """Open every layer available for one scope, e.g. 'TN' or 'JP-KANTO'."""
         client = cls()
-
-        for suffix, factory, *_ in LAYER_CONFIG:
-            if suffix in US_WIDE_LAYERS:
-                continue
-            for alias in LAYER_FILE_ALIASES.get(suffix, (suffix,)):
-                p = data_dir / f"{state_upper}.{alias}.ptiles"
-                if p.exists():
-                    client._layers.append(factory(p))
-                    break
-
-        # National files, which are not per-state and so are never prefixed
-        # with the state abbreviation.
-        for suffix, factory in US_WIDE_LAYERS.items():
-            p = data_dir / f"US.{suffix}.ptiles"
-            if p.exists():
-                client._layers.append(factory(p))
-
+        client._load_scope(Path(data_dir), scope.upper())
         client._wire_cross_layer()
         return client
 
+    @classmethod
+    def open_state(cls, state: str, data_dir: str | os.PathLike) -> "PtilesClient":
+        """Open all available <SCOPE>.<layer>.ptiles files in data_dir.
+
+        Retained under its original name; `open_scope` is the same thing without
+        the US-state framing.
+        """
+        return cls.open_scope(state, data_dir)
+
+    @classmethod
+    def open_country(
+        cls, country: str, data_dir: str | os.PathLike, scopes: list[str] | None = None
+    ) -> "PtilesClient":
+        """Open every scope belonging to one country.
+
+        Granularity varies by layer and by country: Japan's buildings are eight
+        regional files while its places are one country-wide file, so this can
+        return a client holding several files for one layer. Queries pick among
+        them by bounds.
+
+        A `manifest.json` beside the data is authoritative and is used when
+        present -- it names the exact layer versions, so nothing is guessed. It
+        is optional: without one the directory is scanned and filenames are
+        probed instead, which is what a partial or hand-assembled download
+        looks like.
+
+        `scopes` overrides discovery; otherwise the directory is scanned.
+        """
+        data_dir = Path(data_dir)
+        country = country.upper()
+
+        manifest = data_dir / "manifest.json"
+        if manifest.exists() and scopes is None:
+            return cls.from_manifest(manifest, data_dir, country=country)
+
+        client = cls()
+        found = scopes if scopes is not None else cls.discover_scopes(data_dir, country)
+        for scope in sorted(found):
+            client._load_scope(data_dir, scope)
+        client._wire_cross_layer()
+        return client
+
+    @staticmethod
+    def discover_scopes(data_dir: str | os.PathLike, country: str) -> list[str]:
+        """Scopes of one country present in a local snapshot directory."""
+        from ptiles.scopes import country_of, scope_of_filename
+
+        data_dir = Path(data_dir)
+        country = country.upper()
+        seen = set()
+        # Root holds the US set; other countries live in a country directory.
+        for d in (data_dir, data_dir / country):
+            if not d.is_dir():
+                continue
+            for f in d.glob("*.ptiles"):
+                scope = scope_of_filename(f.name)
+                try:
+                    if country_of(scope) == country:
+                        seen.add(scope)
+                except ValueError:
+                    continue
+        return sorted(seen)
+
+    @classmethod
+    def from_manifest(
+        cls,
+        manifest: dict | str | os.PathLike,
+        data_dir: str | os.PathLike,
+        *,
+        country: str | None = None,
+        scopes: list[str] | None = None,
+    ) -> "PtilesClient":
+        """Open the layers a published manifest declares.
+
+        The manifest states which layer versions exist and where each file sits,
+        so nothing here has to guess filenames the way LAYER_FILE_ALIASES does.
+
+        Tolerates manifests published before countries existed: those carry no
+        `countries` index and no per-scope `path`, both of which are derived
+        from the scope names when absent. A manifest that is present but
+        unreadable raises rather than falling back, because a corrupt manifest
+        is a real problem and silently probing the directory would hide it.
+        """
+        import json
+
+        if not isinstance(manifest, dict):
+            src = Path(manifest)
+            if not src.exists():
+                raise FileNotFoundError(f"no manifest at {src}")
+            try:
+                manifest = json.loads(src.read_text())
+            except json.JSONDecodeError as e:
+                raise ValueError(f"manifest at {src} is not valid JSON: {e}") from e
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest must be a JSON object")
+
+        data_dir = Path(data_dir)
+        wanted = set(scopes) if scopes else None
+        if wanted is None and country:
+            country = country.upper()
+            declared = manifest.get("countries")
+            if declared:
+                wanted = set(declared.get(country, []))
+            else:
+                # Pre-countries manifest: work it out from the scope names.
+                from ptiles.scopes import country_of
+
+                wanted = set()
+                for entry in manifest.get("layers", {}).values():
+                    for scope in entry.get("scopes", {}):
+                        try:
+                            if country_of(scope) == country:
+                                wanted.add(scope)
+                        except ValueError:
+                            continue
+
+        by_suffix = {suffix: factory for suffix, factory, *_ in LAYER_CONFIG}
+        by_suffix.update(COUNTRY_WIDE_LAYERS)
+
+        client = cls()
+        for layer, entry in sorted(manifest.get("layers", {}).items()):
+            version = entry.get("version")
+            factory = by_suffix.get(f"{layer}_v{version}" if version else layer)
+            if factory is None:
+                factory = by_suffix.get(layer)
+            if factory is None:
+                # buildings ships as buildings_v9 but is keyed buildings_v8.
+                factory = next(
+                    (f for s, f in by_suffix.items() if s.split("_v")[0] == layer), None
+                )
+            if factory is None:
+                logger.debug("manifest layer %s has no reader, skipping", layer)
+                continue
+            for scope, meta in sorted(entry.get("scopes", {}).items()):
+                if wanted is not None and scope not in wanted:
+                    continue
+                rel = _manifest_relpath(scope, layer, entry, meta)
+                if rel is None:
+                    logger.warning("manifest entry for %s/%s has no usable path",
+                                   layer, scope)
+                    continue
+                # Try the declared path, then the bare filename, so a manifest
+                # also works against a flat directory of downloaded files.
+                p = next(
+                    (c for c in (data_dir / rel, data_dir / Path(rel).name)
+                     if c.exists()),
+                    None,
+                )
+                if p is None:
+                    logger.warning("manifest lists %s but it is missing", rel)
+                    continue
+                try:
+                    client._layers.append(factory(p, scope))
+                except Exception as e:
+                    logger.warning("could not open %s: %s", p, e)
+        client._wire_cross_layer()
+        return client
+
+    def _load_scope(self, data_dir: Path, scope: str) -> None:
+        """Append every layer file found for one scope."""
+        from ptiles.scopes import country_of
+
+        try:
+            country = country_of(scope)
+        except ValueError:
+            logger.warning("not a scope: %r", scope)
+            return
+
+        for suffix, factory, *_ in LAYER_CONFIG:
+            if suffix in COUNTRY_WIDE_LAYERS:
+                continue
+            for alias in LAYER_FILE_ALIASES.get(suffix, (suffix,)):
+                p = self._find(data_dir, country, f"{scope}.{alias}.ptiles")
+                if p is not None:
+                    try:
+                        self._layers.append(factory(p, scope))
+                    except Exception as e:
+                        logger.warning("could not open %s: %s", p, e)
+                    break
+
+        # One file for the whole country, so load it once however many scopes
+        # of that country are opened.
+        for suffix, factory in COUNTRY_WIDE_LAYERS.items():
+            if any(
+                isinstance(l, factory) and getattr(l, "scope", None) == country
+                for l in self._layers
+            ):
+                continue
+            for alias in LAYER_FILE_ALIASES.get(suffix, (suffix,)):
+                p = self._find(data_dir, country, f"{country}.{alias}.ptiles")
+                if p is not None:
+                    try:
+                        self._layers.append(factory(p, country))
+                    except Exception as e:
+                        logger.warning("could not open %s: %s", p, e)
+                    break
+
     def _wire_cross_layer(self) -> None:
-        """Note the readers that other layers need.
+        """Note the layers that other layers need.
 
         Occlusion needs footprints and shading needs both footprints and a
         timezone, so those two answers cannot come from a single layer in
         isolation the way the rest can.
+
+        These are lists because a country can be split across files. Picking the
+        first building layer would hand occlusion and shade a reader for the
+        wrong region entirely; `_reader_for` resolves by bounds at query time.
         """
-        self._buildings = None
-        self._admin = None
-        for layer in self._layers:
-            if isinstance(layer, BuildingLayer):
-                self._buildings = layer._reader
-            elif isinstance(layer, AdminLayer):
-                self._admin = layer._reader
+        self._building_layers = [l for l in self._layers if isinstance(l, BuildingLayer)]
+        self._admin_layers = [l for l in self._layers if isinstance(l, AdminLayer)]
+        # Back-compat: single-file callers still read these attributes.
+        self._buildings = (
+            self._building_layers[0]._reader if self._building_layers else None
+        )
+        self._admin = self._admin_layers[0]._reader if self._admin_layers else None
+
+    @staticmethod
+    def _reader_for(layers, lat, lon):
+        """The reader among `layers` whose file covers this point."""
+        for layer in layers:
+            if layer.covers(lat, lon):
+                return layer._reader
+        return None
 
     def query_point(
         self,
@@ -493,17 +803,26 @@ class PtilesClient:
             at: instant to evaluate the sun at. Defaults to now.
         """
         report = PointReport()
+        buildings_here = self._reader_for(self._building_layers, lat, lon)
+        admin_here = self._reader_for(self._admin_layers, lat, lon)
         kw = dict(
             business_limit=nearby_business_limit,
             business_radius_meters=nearby_business_radius_meters,
             water_radius_meters=water_radius_meters,
             camera_radius_meters=camera_radius_meters,
-            buildings_reader=self._buildings if check_occlusion else None,
+            buildings_reader=buildings_here if check_occlusion else None,
         )
         for layer in self._layers:
+            # Skip files that cannot contain the point. With one file per layer
+            # this only saves a read; with several it is what stops a region
+            # that misses from writing its empty answer over one that hit.
+            # Padded, because a nearest-feature query legitimately reaches
+            # outside the file's own bbox.
+            if not layer.covers(lat, lon, pad=NEIGHBOUR_PAD_DEG):
+                continue
             layer.query_point(lat, lon, report, **kw)
 
-        if include_sun and self._buildings is not None:
+        if include_sun and buildings_here is not None:
             try:
                 from datetime import datetime, timezone
                 from ptiles.sun import is_shaded, local_time, sun_position
@@ -511,12 +830,12 @@ class PtilesClient:
                 when = at or datetime.now(timezone.utc)
                 if when.tzinfo is None:
                     when = when.replace(tzinfo=timezone.utc)
-                if self._admin is not None:
+                if admin_here is not None:
                     # Resolve local time so a caller printing the result sees
                     # the wall clock at the location, not UTC.
-                    report.local_time = local_time(lat, lon, self._admin, when)
+                    report.local_time = local_time(lat, lon, admin_here, when)
                 report.sun = sun_position(lat, lon, when)
-                report.shade = is_shaded(lat, lon, self._buildings, when)
+                report.shade = is_shaded(lat, lon, buildings_here, when)
             except Exception as e:
                 logger.warning("Sun/shade query failed: %s", e)
 
@@ -564,6 +883,11 @@ class PtilesClient:
         report = CorridorReport()
         for layer in self._layers:
             if wanted is not None and type(layer) not in wanted:
+                continue
+            # A corridor can span two regions, so this is a filter, not a
+            # choice: every file that overlaps contributes, and the adapters
+            # extend the report rather than replacing it.
+            if not layer.intersects(min_lat, min_lon, max_lat, max_lon):
                 continue
             layer.query_corridor(
                 min_lat, min_lon, max_lat, max_lon, report, limit_per_layer

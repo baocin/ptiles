@@ -2,6 +2,12 @@
 """
 Upload all PTLR-format roads files to S3 and invalidate CloudFront.
 
+SUPERSEDED by publish_snapshot.py. This script uploads roads only, filters on a
+15-character filename (so it silently ignores any scope that is not two letters,
+such as JP-KANTO), and writes flat to `maps/` with no date prefix -- a layout
+none of the documented URL schemes describe. Use publish_snapshot.py, which
+publishes a whole build as a dated snapshot with its manifest.
+
 Usage:
   python3 deploy_roads.py [source_dir]
 

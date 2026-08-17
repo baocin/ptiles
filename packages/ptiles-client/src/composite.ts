@@ -1,13 +1,12 @@
 // src/composite.ts — PtilesClient
 
-import { join, dirname } from 'path';
-import { existsSync } from 'fs';
-import { FORMAT_SUFFIX } from './header.js';
+import { join } from 'path';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { BuildingsReader } from './layers/buildings.js';
 import { RoadsReader } from './layers/roads.js';
 import { WaterReader } from './layers/water.js';
 import { BusinessReader } from './layers/business.js';
-import type { PointReport, Building, RoadSegment, WaterFeature, ParkFeature, Place, NearestRoad, BusinessHit, Header } from './types.js';
+import type { PointReport, Header } from './types.js';
 
 export interface PointQueryOpts {
   includeBuildings?: boolean;
@@ -18,51 +17,276 @@ export interface PointQueryOpts {
   waterRadiusMeters?: number;
 }
 
+/** A published manifest, as written by scripts/gen_manifest.py. */
+export interface Manifest {
+  built: string;
+  source: string;
+  countries: Record<string, string[]>;
+  layers: Record<string, {
+    version: number | null;
+    pattern: string;
+    scopes: Record<string, { country: string; path: string; bounds: number[] | null }>;
+  }>;
+}
+
+/** Filename suffixes per layer, newest first. Only used without a manifest. */
+const SUFFIXES: Record<string, string[]> = {
+  buildings: ['buildings_v9', 'buildings_v8', 'buildings'],
+  roads: ['highways_v2', 'roads'],
+  water: ['water_v1', 'water'],
+  business: ['business_v4', 'business'],
+};
+
+/**
+ * Country a scope belongs to. A bare two-letter scope is a US state -- the US
+ * set was published first and owns the unprefixed namespace -- while a
+ * hyphenated scope names its country first (`JP-KANTO` -> `JP`).
+ */
+const US_STATES = new Set(
+  ('AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS ' +
+   'MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY').split(' ')
+);
+
+export function countryOf(scope: string): string {
+  const m = /^([A-Z]{2})(?:-([A-Z0-9]+))?$/.exec(scope);
+  if (!m) throw new Error(`not a scope: ${scope}`);
+  const [, head, sub] = m;
+  if (sub) return head;
+  return US_STATES.has(head) || head === 'US' ? 'US' : head;
+}
+
+/** Where a file sits in a snapshot: US at the root, other countries in a dir. */
+export function publishRelpath(scope: string, filename: string): string {
+  const country = countryOf(scope);
+  return country === 'US' ? filename : `${country}/${filename}`;
+}
+
+/**
+ * Where a manifest says a file lives, relative to the snapshot root.
+ * Manifests published before countries existed carry no per-scope `path`, so
+ * fall back to the layer's filename pattern and apply the layout rule.
+ */
+export function manifestRelpath(
+  scope: string,
+  layer: string,
+  entry: { version?: number | null; pattern?: string },
+  meta?: { path?: string }
+): string | null {
+  if (meta?.path) return meta.path;
+  const filename = entry?.pattern
+    ? entry.pattern.replace('{scope}', scope)
+    : entry?.version
+      ? `${scope}.${layer}_v${entry.version}.ptiles`
+      : `${scope}.${layer}.ptiles`;
+  try {
+    return publishRelpath(scope, filename);
+  } catch {
+    return null; // not a scope-shaped name; cannot be placed
+  }
+}
+
+/** One opened file, tagged with the scope it covers. */
+interface Held<T> {
+  scope: string;
+  reader: T & { header: Header };
+}
+
+function covers(h: Header, lat: number, lon: number, pad = 0.05): boolean {
+  // A file with no usable bbox (PTLR roads carry none) is always consulted.
+  if (!h || typeof h.min_lat !== 'number') return true;
+  if (h.min_lat === 0 && h.max_lat === 0) return true;
+  return (
+    lat >= h.min_lat - pad && lat <= h.max_lat + pad &&
+    lon >= h.min_lon - pad && lon <= h.max_lon + pad
+  );
+}
+
 export class PtilesClient {
-  buildings: BuildingsReader | null = null;
-  roads: RoadsReader | null = null;
-  water: WaterReader | null = null;
-  business: BusinessReader | null = null;
-  // Admin, Places, Rail, Parks — stubs for now
+  // Several files can back one layer: Japan's buildings are eight regional
+  // files while its other layers are country-wide, so a client holding "Japan"
+  // holds eight building readers. Queries pick among them by bounds.
+  buildingsAll: Held<BuildingsReader>[] = [];
+  roadsAll: Held<RoadsReader>[] = [];
+  waterAll: Held<WaterReader>[] = [];
+  businessAll: Held<BusinessReader>[] = [];
+
+  /** First-opened reader per layer. Kept so single-scope callers still work. */
+  get buildings(): BuildingsReader | null { return this.buildingsAll[0]?.reader ?? null; }
+  get roads(): RoadsReader | null { return this.roadsAll[0]?.reader ?? null; }
+  get water(): WaterReader | null { return this.waterAll[0]?.reader ?? null; }
+  get business(): BusinessReader | null { return this.businessAll[0]?.reader ?? null; }
+
+  private add(layer: string, scope: string, path: string): void {
+    switch (layer) {
+      case 'buildings':
+        this.buildingsAll.push({ scope, reader: BuildingsReader.open(path) });
+        break;
+      case 'roads':
+        this.roadsAll.push({ scope, reader: RoadsReader.open(path) });
+        break;
+      case 'water':
+        this.waterAll.push({ scope, reader: WaterReader.open(path) });
+        break;
+      case 'business':
+        this.businessAll.push({ scope, reader: BusinessReader.open(path) });
+        break;
+    }
+  }
 
   /**
-   * Open all available layers for a given state from a data directory.
-   * Convention: <dataDir>/<STATE>.<suffix>.ptiles
+   * Open all available layers for one scope.
+   * Published snapshots keep the US at the root and give every other country
+   * its own directory, so both are probed.
    */
-  static openState(state: string, dataDir: string): PtilesClient {
+  static openScope(scope: string, dataDir: string): PtilesClient {
     const client = new PtilesClient();
+    client.loadScope(scope.toUpperCase(), dataDir);
+    return client;
+  }
 
-    const suffixMap: Record<string, string[]> = {
-      'buildings': ['buildings_v8'],
-      'roads': ['roads'],
-      'water': ['water'],
-      'business': ['business'],
-    };
+  /** Original name for openScope, from before non-US countries existed. */
+  static openState(state: string, dataDir: string): PtilesClient {
+    return PtilesClient.openScope(state, dataDir);
+  }
 
-    for (const [layer, suffixes] of Object.entries(suffixMap)) {
-      for (const suffix of suffixes) {
-        const path = join(dataDir, `${state}.${suffix}.ptiles`);
-        if (existsSync(path)) {
-          switch (layer) {
-            case 'buildings':
-              client.buildings = BuildingsReader.open(path);
-              break;
-            case 'roads':
-              client.roads = RoadsReader.open(path);
-              break;
-            case 'water':
-              client.water = WaterReader.open(path);
-              break;
-            case 'business':
-              client.business = BusinessReader.open(path);
-              break;
+  /**
+   * Open every scope belonging to one country.
+   *
+   * A manifest.json beside the data is authoritative and is used when present.
+   * It is optional: without one the directory is scanned and filenames are
+   * probed, which is what a partial or hand-assembled download looks like.
+   */
+  static openCountry(country: string, dataDir: string, scopes?: string[]): PtilesClient {
+    const manifest = join(dataDir, 'manifest.json');
+    if (!scopes && existsSync(manifest)) {
+      return PtilesClient.fromManifest(manifest, dataDir, { country });
+    }
+    const client = new PtilesClient();
+    const want = scopes ?? PtilesClient.discoverScopes(dataDir, country);
+    for (const scope of want.slice().sort()) client.loadScope(scope, dataDir);
+    return client;
+  }
+
+  /** Scopes of one country present in a local snapshot directory. */
+  static discoverScopes(dataDir: string, country: string): string[] {
+    const upper = country.toUpperCase();
+    const found = new Set<string>();
+    for (const dir of [dataDir, join(dataDir, upper)]) {
+      let names: string[];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (!name.endsWith('.ptiles')) continue;
+        const scope = name.split('.')[0];
+        try {
+          if (countryOf(scope) === upper) found.add(scope);
+        } catch {
+          // not a scope-shaped name; ignore
+        }
+      }
+    }
+    return [...found].sort();
+  }
+
+  /**
+   * Open the files a published manifest declares.
+   * The manifest states the layer versions and each file's path, so nothing
+   * here has to guess filenames from a hardcoded suffix list.
+   */
+  static fromManifest(
+    manifest: Manifest | string,
+    dataDir: string,
+    opts: { country?: string; scopes?: string[] } = {}
+  ): PtilesClient {
+    let m: Manifest;
+    if (typeof manifest === 'string') {
+      // A manifest that is present but unreadable is a real fault: raise
+      // rather than falling back to probing, which would hide a corrupt
+      // publish behind a client that merely looks like it works.
+      if (!existsSync(manifest)) throw new Error(`no manifest at ${manifest}`);
+      const text = readFileSync(manifest, 'utf8');
+      try {
+        m = JSON.parse(text);
+      } catch (e) {
+        throw new Error(`manifest at ${manifest} is not valid JSON: ${e}`);
+      }
+    } else {
+      m = manifest;
+    }
+    if (!m || typeof m !== 'object' || Array.isArray(m)) {
+      throw new Error('manifest must be a JSON object');
+    }
+
+    const client = new PtilesClient();
+    const country = opts.country?.toUpperCase();
+    let want: Set<string> | null = null;
+    if (opts.scopes) {
+      want = new Set(opts.scopes);
+    } else if (country) {
+      const declared = m.countries?.[country];
+      if (declared) {
+        want = new Set(declared);
+      } else {
+        // Pre-countries manifest: work membership out from the scope names.
+        want = new Set<string>();
+        for (const entry of Object.values(m.layers ?? {})) {
+          for (const scope of Object.keys(entry.scopes ?? {})) {
+            try {
+              if (countryOf(scope) === country) want.add(scope);
+            } catch {
+              // not a scope-shaped name; ignore
+            }
           }
-          break; // use first matching suffix
         }
       }
     }
 
+    for (const [layer, entry] of Object.entries(m.layers ?? {})) {
+      if (!(layer in SUFFIXES)) continue; // no reader for this layer yet
+      for (const [scope, meta] of Object.entries(entry.scopes ?? {})) {
+        if (want && !want.has(scope)) continue;
+        const rel = manifestRelpath(scope, layer, entry, meta);
+        if (!rel) continue;
+        // Try the declared path, then the bare filename, so a manifest also
+        // works against a flat directory of downloaded files.
+        const path = [join(dataDir, rel), join(dataDir, rel.split('/').pop()!)]
+          .find(p => existsSync(p));
+        if (!path) continue; // partially downloaded snapshot
+        try {
+          client.add(layer, scope, path);
+        } catch {
+          // a file we cannot parse should not take the whole client down
+        }
+      }
+    }
     return client;
+  }
+
+  private loadScope(scope: string, dataDir: string): void {
+    const country = countryOf(scope);
+    for (const [layer, suffixes] of Object.entries(SUFFIXES)) {
+      for (const suffix of suffixes) {
+        const name = `${scope}.${suffix}.ptiles`;
+        const path = [join(dataDir, name), join(dataDir, country, name)]
+          .find(p => existsSync(p));
+        if (path) {
+          try {
+            this.add(layer, scope, path);
+          } catch {
+            // skip unreadable file, keep the rest of the client usable
+          }
+          break; // first matching suffix wins
+        }
+      }
+    }
+  }
+
+  /** Readers whose file can contain this point. */
+  private pick<T>(held: Held<T>[], lat: number, lon: number): Held<T>[] {
+    return held.filter(h => covers(h.reader.header, lat, lon));
   }
 
   /**
@@ -74,7 +298,6 @@ export class PtilesClient {
       includeNearestRoad = true,
       nearbyBusinessLimit = 5,
       nearbyBusinessRadiusMeters = 500,
-      waterRadiusMeters = 100,
     } = opts;
 
     const report: PointReport = {
@@ -88,30 +311,42 @@ export class PtilesClient {
       businesses: [],
     };
 
-    if (includeBuildings && this.buildings) {
-      report.building = this.buildings.query(lat, lon);
+    if (includeBuildings) {
+      // Region files overlap at their seams, so a file can cover the point and
+      // still hold nothing there. Only a hit may set the answer, or a miss from
+      // a neighbouring region would erase it.
+      for (const { reader } of this.pick(this.buildingsAll, lat, lon)) {
+        const hit = reader.query(lat, lon);
+        if (hit) { report.building = hit; break; }
+      }
     }
 
-    if (includeNearestRoad && this.roads) {
-      report.nearest_road = this.roads.nearest(lat, lon, 100);
-      // TODO: nearby_roads (nearestN)
+    if (includeNearestRoad) {
+      for (const { reader } of this.pick(this.roadsAll, lat, lon)) {
+        const near = reader.nearest(lat, lon, 100);
+        // Keep the closest across files, not the last file's answer.
+        if (near && (!report.nearest_road ||
+            near.distance_meters < report.nearest_road.distance_meters)) {
+          report.nearest_road = near;
+        }
+      }
     }
 
-    if (this.business && nearbyBusinessLimit > 0) {
-      report.businesses = this.business.nearby(
-        lat, lon,
-        nearbyBusinessRadiusMeters,
-        nearbyBusinessLimit
-      );
+    if (nearbyBusinessLimit > 0) {
+      for (const { reader } of this.pick(this.businessAll, lat, lon)) {
+        report.businesses.push(
+          ...reader.nearby(lat, lon, nearbyBusinessRadiusMeters, nearbyBusinessLimit)
+        );
+      }
     }
 
     return report;
   }
 
   close(): void {
-    this.buildings?.close();
-    this.roads?.close();
-    this.water?.close();
-    this.business?.close();
+    for (const h of [...this.buildingsAll, ...this.roadsAll,
+                     ...this.waterAll, ...this.businessAll]) {
+      (h.reader as { close?: () => void }).close?.();
+    }
   }
 }

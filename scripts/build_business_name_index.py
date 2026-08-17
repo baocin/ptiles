@@ -284,7 +284,7 @@ NAME_SCAN_VERSION = 1
 NAME_SCAN_LEVEL = 12
 
 
-def name_scan_section(records: list[dict]) -> bytes:
+def name_scan_section(folded_names: list[str], coords: bytes) -> bytes:
     """Every name, folded, in one blob, with positions alongside.
 
     The buckets in this same file answer a prefix query by reading one block of
@@ -304,10 +304,7 @@ def name_scan_section(records: list[dict]) -> bytes:
     import struct
     import zstandard as zstd
 
-    names = "\n".join(_fold_name(r["name"] or "") for r in records).encode("utf-8")
-    coords = bytearray()
-    for r in records:
-        coords.extend(struct.pack("<ii", r["lat_micro"], r["lon_micro"]))
+    names = "\n".join(folded_names).encode("utf-8")
 
     compressor = zstd.ZstdCompressor(level=NAME_SCAN_LEVEL)
     coords_z = compressor.compress(bytes(coords))
@@ -315,7 +312,7 @@ def name_scan_section(records: list[dict]) -> bytes:
 
     out = bytearray(NAME_SCAN_MAGIC)
     out.append(NAME_SCAN_VERSION)
-    out.extend(struct.pack("<I", len(records)))
+    out.extend(struct.pack("<I", len(folded_names)))
     out.extend(struct.pack("<I", len(coords_z)))
     out.extend(coords_z)
     out.extend(names_z)
@@ -399,6 +396,13 @@ def main():
         index_entries = read_index(index_data)
         print(f"  Index entries: {len(index_entries)}", flush=True)
 
+        # Names and positions in record order, for the scan section. Kept as
+        # two flat arrays rather than a list of records: 829,528 dicts is
+        # hundreds of megabytes and the builder streams the file precisely so
+        # it never has to hold them.
+        scan_names: list[str] = []
+        scan_coords = bytearray()
+
         # Read and decompress all blocks, extract records grouped by name key
         # key -> list of encoded records
         grouped: dict[int, list[bytes]] = defaultdict(list)
@@ -441,6 +445,10 @@ def main():
                     key = name_to_key(record["name"])
                     encoded = encode_name_record(record, uid_counter)
                     grouped[key].append(encoded)
+                    scan_names.append(_fold_name(record["name"] or ""))
+                    scan_coords.extend(
+                        struct.pack("<ii", record["lat_micro"], record["lon_micro"])
+                    )
                     uid_counter += 1
                     block_records += 1
             else:
@@ -451,6 +459,10 @@ def main():
                     key = name_to_key(record["name"])
                     encoded = encode_name_record(record, uid_counter)
                     grouped[key].append(encoded)
+                    scan_names.append(_fold_name(record["name"] or ""))
+                    scan_coords.extend(
+                        struct.pack("<ii", record["lat_micro"], record["lon_micro"])
+                    )
 
                     uid_counter += 1
                     block_records += 1
@@ -537,8 +549,19 @@ def main():
         for entry in index_entries_out:
             f.write(compressed_blocks[entry["h3_cell"]])
 
+        # The scan section last, so every offset above is unaffected and a
+        # reader that ignores aux reads exactly the file it read before.
+        aux_offset = f.tell()
+        aux = name_scan_section(scan_names, bytes(scan_coords))
+        f.write(aux)
+
     # Update index entries to use absolute offsets (same as build_business.py pattern)
     with open(output_path, "r+b") as f:
+        # aux_offset (u64) at byte 72, aux_length (u32) at 80 -- taken from the
+        # reader that has to agree, core/src/header.rs.
+        f.seek(72)
+        f.write(aux_offset.to_bytes(8, "little"))
+        f.write(len(aux).to_bytes(4, "little"))
         idx_pos = index_offset + 4  # skip entry count
         for entry in index_entries_out:
             abs_offset = blocks_offset + entry["block_offset"]

@@ -255,6 +255,18 @@ def _without_flights(st, records):
     return kept
 
 
+def category_byte(label: str, cat_idx: dict) -> int:
+    """The byte a record stores for its category.
+
+    0 only when the source gave none. A label that exists but ranked below the
+    254 the field can hold becomes [`CATEGORY_OTHER`], so a truncated tail is
+    visible as itself rather than as missing data.
+    """
+    if not label:
+        return 0
+    return cat_idx.get(label, CATEGORY_OTHER)
+
+
 def encode_v4(rec, uid: int, cat_idx: dict, cell_center_micro: tuple) -> bytes:
     """Encode a single v4 business record — no record_len, sequential uid, i16 coords."""
     buf = bytearray()
@@ -270,7 +282,7 @@ def encode_v4(rec, uid: int, cat_idx: dict, cell_center_micro: tuple) -> bytes:
     buf.extend(struct.pack("<hh", offset_lon, offset_lat))
 
     buf.extend(encode_string_u16(rec["name"]))
-    buf.append(cat_idx.get(rec["primary_category"], 0))
+    buf.append(category_byte(rec["primary_category"], cat_idx))
 
     flags = 0
     if rec["phone"]:
@@ -329,6 +341,15 @@ def encode_v4(rec, uid: int, cat_idx: dict, cell_center_micro: tuple) -> bytes:
 
 # Aux section magic: the category table a pack carries about itself.
 CATEGORY_AUX_MAGIC = b"PTCT"
+# The byte a record carries when its category is known but did not fit.
+#
+# Only 254 categories fit in the field, so the rest of the tail used to be
+# written as 0 -- the same value as "this record has no category at all". That
+# is not truncation, it is truncation pretending to be absence: 37% of
+# Tennessee's records read as uncategorised and nobody could say how many of
+# them actually had one. 255 says "categorised, below the cut", and 0 goes back
+# to meaning what it says.
+CATEGORY_OTHER = 255
 # Byte offset of aux_offset in the 256-byte header; aux_length follows it.
 AUX_OFFSET_FIELD = 72
 CATEGORY_AUX_VERSION = 1
@@ -373,6 +394,9 @@ def category_aux(state: str, cat_idx: dict, record_count: int) -> bytes:
     """
     ordered = sorted(cat_idx.items(), key=lambda kv: kv[1])
     labels = [label for label, _ in ordered]
+    # 255 is a category like any other as far as a reader is concerned, and it
+    # has to be named or the byte resolves to nothing.
+    ordered = ordered + [("other", CATEGORY_OTHER)]
     stamp = build_id(state, labels, record_count).encode()
 
     out = bytearray(CATEGORY_AUX_MAGIC)
@@ -408,6 +432,20 @@ def build_state_ptiles(state, brand_map, chain_idx):
     cat_idx = {c: i + 1 for i, (c, _) in enumerate(sorted_cats[:254])}
     cat_rev = [c for c, _ in sorted_cats[:254]]
     print(f"  Categories: {len(cat_idx)}", flush=True)
+    truncated = sum(
+        1 for r in records if r["primary_category"] and r["primary_category"] not in cat_idx
+    )
+    if truncated:
+        distinct = len({
+            r["primary_category"]
+            for r in records
+            if r["primary_category"] and r["primary_category"] not in cat_idx
+        })
+        print(
+            f"  {distinct} categories past the 254 the field holds: "
+            f"{truncated} records written as 'other' rather than as uncategorised",
+            flush=True,
+        )
 
     # Group by H3
     cells = defaultdict(list)

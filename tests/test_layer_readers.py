@@ -154,6 +154,36 @@ def test_ptlr_header_bounds_are_used():
     assert 122 < h["min_lon"] < h["max_lon"] < 155
 
 
+US_ROADS_DIR = DATA / "states/roads"
+
+
+@pytest.mark.skipif(not US_ROADS_DIR.is_dir(), reason="no US roads files")
+def test_published_v1_files_are_readable():
+    """Every roads file published before the v2 header is v1, which records no
+    dictionary lengths. They are still recoverable: a trained zstd dictionary
+    starts with its own magic, so the boundaries can be scanned for. Without
+    that, the whole published US set stays unreadable until it is rebuilt.
+    """
+    files = sorted(US_ROADS_DIR.glob("*.roads.ptiles"))
+    if not files:
+        pytest.skip("no US roads files")
+    for path in files:
+        r = RoadsReader.open(path)
+        assert isinstance(r, PtlrRoadsReader)
+        assert r.band_bytes("z04"), f"{path.name} produced no Z04 records"
+
+
+@pytest.mark.skipif(
+    not (US_ROADS_DIR / "AK.roads.ptiles").exists(), reason="no AK roads"
+)
+def test_v1_query_returns_real_streets():
+    r = RoadsReader.open(US_ROADS_DIR / "AK.roads.ptiles")
+    assert r.header["version"] == 1
+    hits = r.nearest_n(61.2176, -149.8631, n=3, radius_meters=2000)  # Anchorage
+    assert hits
+    assert any(h.road.name for h in hits), "expected at least one named street"
+
+
 @pytest.mark.skipif(not JP_ROADS.exists(), reason="no roads file")
 def test_roads_nearest_finds_tokyo_station():
     """The slowest test here (~20s): it builds the in-memory index over 10.5M

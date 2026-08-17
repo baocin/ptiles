@@ -577,14 +577,38 @@ class PtlrRoadsReader:
                 mny / 100_000, mnx / 100_000, mxy / 100_000, mxx / 100_000
             )
         else:
-            # v1 recorded neither dictionary lengths nor bounds, so its frames
-            # cannot be decompressed at all -- the dictionaries are
-            # concatenated with no way to tell where one ends.
-            self._dict_lens = None
+            # v1 recorded neither dictionary lengths nor bounds. The lengths are
+            # still recoverable: a trained zstd dictionary starts with its own
+            # magic, so the boundaries can be found by scanning. That matters --
+            # every roads file published before the v2 header is v1, so without
+            # this the 51 US files stay unreadable until they are rebuilt.
+            self._dict_lens = self._recover_v1_dict_lens()
             self._bounds = None
 
         self._band_cache: dict[str, bytes] = {}
         self._grid_cache: dict[str, dict] = {}
+
+    _ZSTD_DICT_MAGIC = b"\x37\xa4\x30\xec"
+
+    def _recover_v1_dict_lens(self) -> tuple[int, ...] | None:
+        """Split a v1 file's concatenated dictionaries by their zstd magic.
+
+        Returns None if the scan does not find exactly one dictionary per band,
+        in which case the file really is unreadable and says so on use.
+        """
+        first_band = min(b["offset"] for b in self._bands.values())
+        if first_band <= HEADER_SIZE:
+            return None
+        self._file.seek(HEADER_SIZE)
+        blob = self._file.read(first_band - HEADER_SIZE)
+        starts = [
+            i for i in range(len(blob) - 4)
+            if blob[i : i + 4] == self._ZSTD_DICT_MAGIC
+        ]
+        if len(starts) != len(PTLR_BANDS) or starts[0] != 0:
+            return None
+        ends = starts[1:] + [len(blob)]
+        return tuple(e - s for s, e in zip(starts, ends))
 
     @classmethod
     def open(cls, path: str | os.PathLike) -> "PtlrRoadsReader":
@@ -610,9 +634,9 @@ class PtlrRoadsReader:
     def _dict_for(self, band: str) -> bytes:
         if not self._dict_lens:
             raise ValueError(
-                f"{self._filepath}: PTLR v{self._format_version} does not record "
-                "dictionary lengths, so its frames cannot be decompressed. "
-                "Rebuild with scripts/build_roads.py."
+                f"{self._filepath}: PTLR v{self._format_version} records no "
+                "dictionary lengths and they could not be recovered by scanning "
+                "for the zstd dictionary magic. Rebuild with build_roads.py."
             )
         start = HEADER_SIZE
         for name, length in zip(PTLR_BANDS, self._dict_lens):

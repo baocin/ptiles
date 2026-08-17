@@ -148,8 +148,11 @@ def enc(feat, pid):
     coords = _fit_vertices(list(feat["coords"]))
     feat = {**feat, "coords": coords}
     n = len(coords)
-    buf.append(n if n < 256 else 255)
-    if n >= 256:
+    # 255 is the escape marker, so it cannot also be a literal count: writing it
+    # bare made the reader consume the next two coordinate bytes as a u16 and
+    # desync the remainder of the cell. Escape at >= 255, not >= 256.
+    buf.append(n if n < 255 else 255)
+    if n >= 255:
         buf.append(n & 0xFF)
         buf.append((n >> 8) & 0xFF)
     buf.extend(

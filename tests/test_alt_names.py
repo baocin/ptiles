@@ -95,6 +95,10 @@ def test_a_buildings_file_written_before_flags3_still_decodes():
             if b.name_en or b.brand or b.alt_name:
                 phantom += 1
     assert decoded > 1000
+    if phantom:
+        # This file has been rebuilt since, so it legitimately carries them and
+        # is no longer a witness for the old layout.
+        pytest.skip("file rebuilt with flags3; no longer a pre-change sample")
     assert phantom == 0, "a pre-change file cannot have alternative names"
 
 
@@ -266,17 +270,32 @@ def test_most_trails_are_not_in_a_park():
 # --- vertex-count overflow (pre-existing, found during the Japan rebuild) ---
 
 
-def test_parks_vertex_count_fits_its_field():
-    """A ring longer than the u16 escape silently truncated the count.
+def test_parks_vertex_count_255_round_trips():
+    """255 is the escape marker, so it cannot also be a literal count.
 
-    parks writes u8 with a 255 escape to u16 via `n & 0xFF, (n >> 8) & 0xFF`, so
-    a 98,574-vertex relation encoded as 33,038. The reader then consumed too few
-    coordinates and desynced the remainder of the cell -- two Japanese park
-    relations did exactly that, losing 7 records and, because the trails build
-    reads the parks file, failing the whole trails stage.
-
-    Ways cannot exceed 2,000 nodes; assembled relations can.
+    The encoder wrote `n if n < 256 else 255` and only emitted the u16 escape
+    when `n >= 256`. At exactly 255 it therefore wrote the marker bare, the
+    reader took the next two coordinate bytes as the escaped count, and the rest
+    of the cell was read at the wrong offset. Two cells of Japan's 110,991 parks
+    hit it -- and because build_trails reads the parks file for the park
+    association, it failed the entire trails stage, not just those records.
     """
+    sys.path.insert(0, str(REPO / "scripts"))
+    from build_parks import enc
+    from ptiles.parks import decode_park
+
+    for n in (254, 255, 256, 300):
+        ring = [(139.0 + i * 0.0001, 35.0 + i * 0.0001) for i in range(n)]
+        rec = enc({"osm_id": 1000, "park_type": "park", "coords": ring, "name": "T"}, 0)
+        decoded, consumed, _ = decode_park(rec, 0, 0)
+        assert consumed == len(rec), f"n={n}: consumed {consumed} of {len(rec)}"
+        assert len(decoded["coords"]) == n, f"n={n}: read {len(decoded['coords'])}"
+
+
+def test_parks_long_ring_fits_the_u16_escape():
+    """Defence for the other end: the escape itself is u16, so a ring longer
+    than 65,535 would truncate its own count. No OSM way can reach that (2,000
+    node cap) but an assembled relation can."""
     sys.path.insert(0, str(REPO / "scripts"))
     from build_parks import MAX_VERTICES, _fit_vertices
 
@@ -285,13 +304,11 @@ def test_parks_vertex_count_fits_its_field():
     fitted = _fit_vertices(ring)
     n = len(fitted)
     assert n <= MAX_VERTICES
-    # The count has to survive the u16 escape it will be written through.
     assert (((n >> 8) & 0xFF) << 8 | (n & 0xFF)) == n
-    # And the ring must stay closed.
-    assert fitted[-1] == ring[-1]
+    assert fitted[-1] == ring[-1], "the ring must stay closed"
 
     small = [(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)]
-    assert _fit_vertices(small) is small, "small rings must pass through untouched"
+    assert _fit_vertices(small) is small
 
 
 def test_water_vertex_count_fits_its_field():

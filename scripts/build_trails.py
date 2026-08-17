@@ -262,8 +262,18 @@ def load_park_index(abbr):
     reader = ParkReader.open(found[-1])
     grid = {}
     count = 0
+    unreadable = 0
     for entry in reader._index:
-        for park in reader.get_in_cell(entry["h3_cell"]):
+        # One malformed cell must not take the whole trails build down with it.
+        # It did: a parks encoding bug desynced two cells out of 110,991 and the
+        # exception propagated out of here, failing the entire stage rather than
+        # costing a handful of park associations.
+        try:
+            parks_in_cell = reader.get_in_cell(entry["h3_cell"])
+        except Exception:
+            unreadable += 1
+            continue
+        for park in parks_in_cell:
             if not park.coords or len(park.coords) < 3:
                 continue
             ring = tuple(park.coords)
@@ -274,6 +284,9 @@ def load_park_index(abbr):
             }
             for key in keys:
                 grid.setdefault(key, []).append((park.osm_id, ring))
+    if unreadable:
+        print(f"  parks: WARNING {unreadable} cells unreadable and skipped",
+              flush=True)
     print(f"  parks: indexed {count} polygons from {Path(found[-1]).name}",
           flush=True)
     return grid

@@ -562,11 +562,13 @@ LAYER_FILE_ALIASES: dict[str, tuple[str, ...]] = {
     "business": ("business_v4", "business"),
     "roads": ("highways_v2", "roads"),
     "water": ("water_v1", "water"),
-    "places": ("places_v1", "places"),
-    "parks": ("parks_v1", "parks"),
-    "rail": ("rail_v1", "rail"),
-    "trails": ("trails_v1", "trails"),
-    "ev": ("ev_v1", "ev"),
+    # v2 carries name:en and brand. Newest first: a v1 file is still readable,
+    # its alternative-name flag bits are simply clear.
+    "places": ("places_v2", "places_v1", "places"),
+    "parks": ("parks_v2", "parks_v1", "parks"),
+    "rail": ("rail_v2", "rail_v1", "rail"),
+    "trails": ("trails_v2", "trails_v1", "trails"),
+    "ev": ("ev_v2", "ev_v1", "ev"),
 }
 
 

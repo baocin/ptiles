@@ -104,23 +104,56 @@ PBF_MAP = {
 
 
 class AddrExtractor(osmium.SimpleHandler):
+    """Every addr:housenumber in the extract, on a node or a way.
+
+    This used to take building ways only, which dropped both the standalone
+    address nodes (20,085 of Tennessee's 154,349 addr:housenumber objects) and
+    any way carrying an address without a building tag. An address point is an
+    address whether or not someone also drew the roof it sits under.
+
+    Nodes and ways share no id space in OSM, so a node and a way can both be
+    id 1234; `seen` therefore keys on the address itself, not the id. It exists
+    because mappers commonly tag the same address twice, once on the building
+    outline and once on a POI node inside it, and two records 4 m apart make
+    "nearest address" answer the same house twice.
+    """
+
     def __init__(self):
         super().__init__()
         self.addrs = []
+        # (housenumber, street, lat, lon) rounded to 1e-4 deg -- about 11 m,
+        # which separates neighbouring houses but not a duplicate of one.
+        self.seen = set()
+
+    def _add(self, osm_id, lat, lon, hn, st):
+        key = (hn, st, round(lat, 4), round(lon, 4))
+        if key in self.seen:
+            return
+        try:
+            cell = h3.latlng_to_cell(lat, lon, H3_RES)
+        except Exception:
+            return
+        self.seen.add(key)
+        self.addrs.append(
+            {
+                "osm_id": osm_id,
+                "lon": lon,
+                "lat": lat,
+                "housenumber": hn,
+                "street": st,
+                "cell": int(cell, 16) if isinstance(cell, str) else cell,
+            }
+        )
+
+    def node(self, n):
+        hn = n.tags.get("addr:housenumber")
+        if not hn or not n.location.valid():
+            return
+        self._add(n.id, n.location.lat, n.location.lon, hn, n.tags.get("addr:street") or "")
 
     def way(self, w):
-        hn = st = None
-        has_building = False
-        for t in w.tags:
-            if t.k == "building" and t.v:
-                has_building = True
-            elif t.k == "addr:housenumber" and t.v:
-                hn = t.v
-            elif t.k == "addr:street" and t.v:
-                st = t.v
-        if not has_building or not hn:
-            return
-        if not w.nodes:
+        hn = w.tags.get("addr:housenumber")
+        if not hn or not w.nodes:
             return
         lon = lat = None
         for n in w.nodes:
@@ -129,20 +162,7 @@ class AddrExtractor(osmium.SimpleHandler):
                 break
         if lon is None:
             return
-        try:
-            cell = h3.latlng_to_cell(lat, lon, H3_RES)
-        except:
-            return
-        self.addrs.append(
-            {
-                "osm_id": w.id,
-                "lon": lon,
-                "lat": lat,
-                "housenumber": hn,
-                "street": st or "",
-                "cell": int(cell, 16) if isinstance(cell, str) else cell,
-            }
-        )
+        self._add(w.id, lat, lon, hn, w.tags.get("addr:street") or "")
 
 
 def enc(a, pid, cell_center_micro):

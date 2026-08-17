@@ -63,6 +63,9 @@ class Trail:
     sac: str = ""
     """SAC hiking scale. Empty when the way carries no difficulty tag."""
     name: str | None = None
+    # v2 additions. name:en is the valuable one outside the US.
+    name_en: str | None = None
+    brand: str | None = None
     coords: list[tuple[float, float]] = field(default_factory=list)
     """(lon, lat) pairs. A single pair for a point."""
 
@@ -106,6 +109,18 @@ def decode_trail(data: bytes, pos: int, prev_osm_id: int) -> tuple[Trail, int, i
         pos += 2
         name = data[pos : pos + n].decode("utf-8", "replace")
         pos += n
+    # v2: flag-guarded, so a v1 file has the bits clear and needs no branch.
+    name_en = brand = None
+    for _bit, _which in ((0x02, "name_en"), (0x04, "brand")):
+        if flags & _bit:
+            (n,) = struct.unpack_from("<H", data, pos)
+            pos += 2
+            _val = data[pos : pos + n].decode("utf-8", "replace")
+            pos += n
+            if _which == "name_en":
+                name_en = _val
+            else:
+                brand = _val
 
     first_lon, first_lat = coords[0]
     return (
@@ -118,6 +133,8 @@ def decode_trail(data: bytes, pos: int, prev_osm_id: int) -> tuple[Trail, int, i
             surface=surface,
             sac=sac,
             name=name,
+            name_en=name_en,
+            brand=brand,
             coords=coords,
         ),
         pos,

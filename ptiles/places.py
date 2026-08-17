@@ -46,6 +46,10 @@ class Place:
     population: int
     name: str
     alt_name: str | None = None
+    # v2 additions. name:en matters outside the US -- a third of named Japanese
+    # features carry one, and nothing used to read it.
+    name_en: str | None = None
+    brand: str | None = None
     admin_level: int | None = None
 
 
@@ -75,6 +79,16 @@ def decode_place(data: bytes, offset: int, prev_osm_id: int) -> tuple[dict, int,
     if flags & 0x02:
         admin_level = data[pos]
         pos += 1
+    # v2: name:en and brand. Flag-guarded, so a v1 file simply has the bits
+    # clear -- the reader needs no version check, only the writer does.
+    name_en = None
+    brand = None
+    if flags & 0x04:
+        name_en, consumed = decode_string_u16(data, pos)
+        pos += consumed
+    if flags & 0x08:
+        brand, consumed = decode_string_u16(data, pos)
+        pos += consumed
     return (
         {
             "osm_id": osm_id,
@@ -85,6 +99,8 @@ def decode_place(data: bytes, offset: int, prev_osm_id: int) -> tuple[dict, int,
             "name": name,
             "alt_name": alt_name,
             "admin_level": admin_level,
+            "name_en": name_en,
+            "brand": brand,
         },
         pos - offset,
         osm_id,
@@ -184,6 +200,8 @@ class PlacesReader(BlockFileReader):
                 population=d["population"],
                 name=d["name"],
                 alt_name=d["alt_name"],
+                name_en=d.get("name_en"),
+                brand=d.get("brand"),
                 admin_level=d["admin_level"],
             )
             for d in raw_dicts

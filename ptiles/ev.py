@@ -54,6 +54,9 @@ class Charger:
     name: str | None = None
     network: str | None = None
     ref: str | None = None
+    # v2 additions.
+    name_en: str | None = None
+    brand: str | None = None
 
 
 def decode_charger(data: bytes, pos: int, prev_osm_id: int) -> tuple[Charger, int, int]:
@@ -83,6 +86,17 @@ def decode_charger(data: bytes, pos: int, prev_osm_id: int) -> tuple[Charger, in
         n = data[pos]; pos += 1
         ref = data[pos : pos + n].decode("utf-8", "replace")
         pos += n
+    # v2: flag-guarded, so a v1 file has the bits clear and needs no branch.
+    name_en = brand = None
+    if flags & 0x08:
+        (n,) = struct.unpack_from("<H", data, pos)
+        pos += 2
+        name_en = data[pos : pos + n].decode("utf-8", "replace")
+        pos += n
+    if flags & 0x10:
+        n = data[pos]; pos += 1
+        brand = data[pos : pos + n].decode("utf-8", "replace")
+        pos += n
 
     return (
         Charger(
@@ -97,6 +111,8 @@ def decode_charger(data: bytes, pos: int, prev_osm_id: int) -> tuple[Charger, in
             name=name,
             network=network,
             ref=ref,
+            name_en=name_en,
+            brand=brand,
         ),
         pos,
         osm_id,

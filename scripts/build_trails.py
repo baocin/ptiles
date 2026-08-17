@@ -45,7 +45,7 @@ from states import STATES, get_state, pbf_path as find_pbf, scopes_for_country
 OUTPUT_DIR = Path("/mnt/core/kino/ptiles/data/states")
 PBF_DIR = Path("/mnt/core/timeline-ptiles-cache/2026-08-06/pbf")
 MAGIC = b"PTILESH\x00"
-VERSION = 1
+VERSION = 2  # v2 adds name:en and brand (0x02/0x04)
 H3_RES = 7
 
 # Way types captured as linestrings. Order is the on-disk type index; append
@@ -154,6 +154,8 @@ def extract(pbf):
                 "geom_type": 1 if is_node else 0,
                 "coords": coords,
                 "name": tags.get("name"),
+                "name_en": tags.get("name:en"),
+                "brand": tags.get("brand"),
                 "surface": SURFACE_IDX.get(tags.get("surface", ""), 0),
                 "sac": SAC_IDX.get(tags.get("sac_scale", ""), 0),
                 "cell": int(cell, 16) if isinstance(cell, str) else cell,
@@ -201,11 +203,23 @@ def enc(feat, pid):
     buf.append(feat["surface"])
     buf.append(feat["sac"])
     flags = 0x01 if feat.get("name") else 0
+    if feat.get("name_en"):
+        flags |= 0x02
+    if feat.get("brand"):
+        flags |= 0x04
     buf.append(flags)
     if feat.get("name"):
         nb = feat["name"].encode("utf-8")
         buf.extend(struct.pack("<H", len(nb)))
         buf.extend(nb)
+    # v2 fields after every v1 field, so the prefix layout is untouched. These
+    # records are not length-prefixed, so a v1 reader must not read a v2 file --
+    # that is what the version bump is for.
+    for key in ("name_en", "brand"):
+        if feat.get(key):
+            vb = feat[key].encode("utf-8")
+            buf.extend(struct.pack("<H", len(vb)))
+            buf.extend(vb)
     return bytes(buf)
 
 

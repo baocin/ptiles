@@ -57,7 +57,7 @@ from states import STATES, get_state, pbf_path as find_pbf, scopes_for_country
 OUTPUT_DIR = Path(os.environ.get("PTILES_OUT", "/mnt/core/kino/ptiles/data/states"))
 PBF_DIR = Path("/mnt/core/timeline-ptiles-cache/2026-08-06/pbf")
 MAGIC = b"PTILESE\x00"
-VERSION = 1
+VERSION = 2  # v2 adds name:en and brand (0x08/0x10)
 H3_RES = 7
 
 # On-disk index for `access`. Append only, never reorder.
@@ -214,6 +214,8 @@ def extract(pbf):
                 "capacity": station_capacity(tags),
                 "sockets": station_sockets(tags),
                 "name": tags.get("name"),
+                "name_en": tags.get("name:en"),
+                "brand": tags.get("brand"),
                 "network": tags.get("network") or tags.get("operator") or tags.get("brand"),
                 "ref": tags.get("ref"),
                 "cell": int(cell, 16) if isinstance(cell, str) else cell,
@@ -237,7 +239,13 @@ def enc(feat, pid):
     name = feat.get("name")
     network = feat.get("network")
     ref = feat.get("ref")
+    name_en = feat.get("name_en")
+    brand = feat.get("brand")
     flags = (0x01 if name else 0) | (0x02 if network else 0) | (0x04 if ref else 0)
+    if name_en:
+        flags |= 0x08
+    if brand:
+        flags |= 0x10
     buf.append(flags)
     if name:
         nb = name.encode("utf-8")[:65535]
@@ -251,6 +259,16 @@ def enc(feat, pid):
         rb = ref.encode("utf-8")[:255]
         buf.append(len(rb))
         buf.extend(rb)
+    # v2 fields last, after every v1 field. Records are not length-prefixed, so
+    # a v1 reader must not be pointed at a v2 file -- hence the version bump.
+    if name_en:
+        nb = name_en.encode("utf-8")
+        buf.extend(struct.pack("<H", len(nb)))
+        buf.extend(nb)
+    if brand:
+        bb = brand.encode("utf-8")[:255]
+        buf.append(len(bb))
+        buf.extend(bb)
     return bytes(buf)
 
 

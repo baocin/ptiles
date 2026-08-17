@@ -45,6 +45,9 @@ class RailFeature:
     geom_type: int  # 0 = linestring/track, 1 = point/station
     coords: tuple[tuple[float, float], ...]
     name: str | None = None
+    # v2 additions. name:en is the valuable one outside the US.
+    name_en: str | None = None
+    brand: str | None = None
 
 
 def decode_rail(data: bytes, offset: int, prev_osm_id: int) -> tuple[dict, int, int]:
@@ -80,6 +83,14 @@ def decode_rail(data: bytes, offset: int, prev_osm_id: int) -> tuple[dict, int, 
     if flags & 0x01:
         name, consumed = decode_string_u16(data, pos)
         pos += consumed
+    # v2: flag-guarded, so a v1 file has the bits clear and needs no branch.
+    name_en = brand = None
+    if flags & 0x02:
+        name_en, consumed = decode_string_u16(data, pos)
+        pos += consumed
+    if flags & 0x04:
+        brand, consumed = decode_string_u16(data, pos)
+        pos += consumed
     return (
         {
             "osm_id": osm_id,
@@ -87,6 +98,8 @@ def decode_rail(data: bytes, offset: int, prev_osm_id: int) -> tuple[dict, int, 
             "geom_type": geom_type,
             "coords": coords,
             "name": name,
+            "name_en": name_en,
+            "brand": brand,
         },
         pos - offset,
         osm_id,
@@ -126,6 +139,8 @@ class RailReader(BlockFileReader):
                 geom_type=d["geom_type"],
                 coords=tuple(d["coords"]),
                 name=d["name"],
+                name_en=d.get("name_en"),
+                brand=d.get("brand"),
             )
             for d in raw_dicts
         ]

@@ -68,6 +68,11 @@ class Building:
     # Coarse bucket, always present in the record but derived from the same
     # tag — so it reads "unknown" for the same 99.7%.
     height_tier: str = "unknown"
+    # Alternative names, behind flags2 0x80 -> flags3. name:en is the valuable
+    # one outside the US: 32% of named Japanese features carry it.
+    name_en: str | None = None
+    brand: str | None = None
+    alt_name: str | None = None
 
 
 def compute_centroid(coords: tuple[tuple[float, float], ...]) -> tuple[float, float]:
@@ -145,9 +150,15 @@ def decode_building_v8(data: bytes, offset: int, prev_osm_id: int,
         else:
             btype = "yes"
 
-        # 5. Extended flags
+        # 5. Extended flags. 0x80 escapes to a second flags byte carrying the
+        # alternative names; it is read here because the encoder writes it
+        # immediately after flags2, before any optional payload.
         flags2 = data[pos]
         pos += 1
+        flags3 = 0
+        if flags2 & 0x80:
+            flags3 = data[pos]
+            pos += 1
 
         name = None
         category = None
@@ -172,9 +183,26 @@ def decode_building_v8(data: bytes, offset: int, prev_osm_id: int,
         if flags2 & 0x10:  # has_height_m — u8 in 0.5 m steps
             height_m = data[pos] * 0.5
             pos += 1
-        # flags2 & 0x20 (shop) and 0x40 (opening_hours) are v9 additions; the
-        # record ends here for our purposes and the caller advances by the
-        # length prefix, so they need no skip.
+        # 0x20 (business tag) and 0x40 (opening_hours) used to be skipped, since
+        # the caller advances by the length prefix. They have to be walked now:
+        # the alternative names sit after them.
+        if flags2 & 0x20:
+            business_tag, consumed = decode_table_ref(data, pos, string_table)
+            pos += consumed
+        if flags2 & 0x40:
+            _oh, consumed = decode_string_u8(data, pos)
+            pos += consumed
+
+        name_en = brand = alt_name = None
+        if flags3 & 0x01:
+            name_en, consumed = decode_table_ref(data, pos, string_table)
+            pos += consumed
+        if flags3 & 0x02:
+            brand, consumed = decode_table_ref(data, pos, string_table)
+            pos += consumed
+        if flags3 & 0x04:
+            alt_name, consumed = decode_table_ref(data, pos, string_table)
+            pos += consumed
 
         coords_tuple = tuple(coords_list)
         centroid_lon, centroid_lat = compute_centroid(coords_tuple)
@@ -191,6 +219,9 @@ def decode_building_v8(data: bytes, offset: int, prev_osm_id: int,
             poi_osm_id=poi_osm_id,
             height_m=height_m,
             height_tier=height_tier,
+            name_en=name_en or None,
+            brand=brand or None,
+            alt_name=alt_name or None,
         )
 
         return building, pos - offset, osm_id

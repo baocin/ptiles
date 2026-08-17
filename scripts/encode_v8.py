@@ -182,6 +182,9 @@ def encode_building_v8(
     shop = building.get("shop", "")
     amenity_val = building.get("amenity", "")
     opening_hours = building.get("opening_hours", "")
+    name_en = building.get("name_en", "")
+    brand = building.get("brand", "")
+    alt_name = building.get("alt_name", "")
     business_tag = shop or amenity_val  # ponytail: shop beats amenity when both set
 
     # 1. OSM ID delta
@@ -247,7 +250,22 @@ def encode_building_v8(
     if opening_hours:
         flags2 |= 0x40  # v9: OSM opening_hours string
 
+    # 0x80 is the last bit in flags2, so it escapes to a second flags byte
+    # rather than naming a field. Alternative names go there: 32% of named
+    # Japanese features carry name:en and nothing was reading it.
+    flags3 = 0
+    if name_en:
+        flags3 |= 0x01
+    if brand:
+        flags3 |= 0x02
+    if alt_name:
+        flags3 |= 0x04
+    if flags3:
+        flags2 |= 0x80
+
     buf.append(flags2)
+    if flags3:
+        buf.append(flags3)
 
     # 7. Optional fields
     if name:
@@ -267,6 +285,16 @@ def encode_building_v8(
         )  # ponytail: table ref, same as btype
     if opening_hours:
         buf.extend(encode_string_u8(opening_hours))
+    # Alternative names last, so a reader that stops at flags2 still walks every
+    # field before them correctly. Records are length-prefixed, so an older
+    # reader skips these without desyncing -- buildings is the only layer where
+    # that is true.
+    if name_en:
+        buf.extend(encode_table_ref(name_en, string_lookup))
+    if brand:
+        buf.extend(encode_table_ref(brand, string_lookup))
+    if alt_name:
+        buf.extend(encode_table_ref(alt_name, string_lookup))
 
     return bytes(buf), osm_id, name, btype
 
@@ -304,6 +332,9 @@ def encode_block_v8(
             all_strings.append(amenity_val)
         if b.get("opening_hours"):
             all_strings.append(b["opening_hours"])
+        for key in ("name_en", "brand", "alt_name"):
+            if b.get(key):
+                all_strings.append(b[key])
 
     table, lookup = build_string_table(all_strings)
 

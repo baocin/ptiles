@@ -34,7 +34,7 @@ from states import STATES, get_state, pbf_path as find_pbf, scopes_for_country
 OUTPUT_DIR = Path("/mnt/core/kino/ptiles/data/states")
 PBF_DIR = Path("/mnt/aoi/kino/ptiles/pbfs")
 MAGIC = b"PTILESP\x00"
-VERSION = 1
+VERSION = 2  # v2 adds name:en and brand (0x04/0x08)
 H3_RES = 7
 
 PT = [
@@ -64,6 +64,8 @@ def extract(pbf):
         pop = 0
         an = None
         al = None
+        en = None
+        br = None
         for t in obj.tags:
             if t.k == "place" and t.v:
                 pt = t.v
@@ -76,6 +78,10 @@ def extract(pbf):
                     pass
             elif t.k == "alt_name" and t.v:
                 an = t.v
+            elif t.k == "name:en" and t.v:
+                en = t.v
+            elif t.k == "brand" and t.v:
+                br = t.v
             elif t.k == "admin_level" and t.v:
                 try:
                     al = int(t.v)
@@ -97,6 +103,8 @@ def extract(pbf):
                 "name": nm,
                 "alt_name": an,
                 "admin_level": al,
+                "name_en": en,
+                "brand": br,
                 "cell": int(c, 16) if isinstance(c, str) else c,
             }
         )
@@ -117,6 +125,10 @@ def enc(p, pid):
         f |= 1
     if p.get("admin_level") is not None:
         f |= 2
+    if p.get("name_en"):
+        f |= 4
+    if p.get("brand"):
+        f |= 8
     b.append(f)
     if p.get("alt_name"):
         an = p["alt_name"].encode("utf-8")
@@ -124,6 +136,14 @@ def enc(p, pid):
         b.extend(an)
     if p.get("admin_level") is not None:
         b.append(p["admin_level"])
+    # v2 fields last, after every v1 field, so the layout up to here is
+    # unchanged. Records here are not length-prefixed, so a v1 reader must not
+    # be pointed at a v2 file -- hence the version bump.
+    for key in ("name_en", "brand"):
+        if p.get(key):
+            vb = p[key].encode("utf-8")
+            b.extend(struct.pack("<H", len(vb)))
+            b.extend(vb)
     return bytes(b)
 
 

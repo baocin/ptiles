@@ -50,7 +50,8 @@ VERSION = 9
 
 def as_dict(b):
     """Compact building tuple back to the dict encode_block_v8 expects."""
-    osm_id, ring, btype, height, name, shop, amenity_val, opening_hours = b
+    (osm_id, ring, btype, height, name, shop, amenity_val, opening_hours,
+     name_en, brand, alt_name) = b
     d = {
         "osm_id": osm_id,
         "coords": [
@@ -68,6 +69,12 @@ def as_dict(b):
         d["amenity"] = amenity_val
     if opening_hours:
         d["opening_hours"] = opening_hours
+    if name_en:
+        d["name_en"] = name_en
+    if brand:
+        d["brand"] = brand
+    if alt_name:
+        d["alt_name"] = alt_name
     return d
 
 
@@ -124,6 +131,9 @@ class BuildingHandler(osmium.SimpleHandler):
             shop = None
             amenity_val = None
             opening_hours = None
+            name_en = None
+            brand = None
+            alt_name = None
             for tag in w.tags:
                 if tag.k == "building" and tag.v:
                     btype = tag.v
@@ -139,13 +149,20 @@ class BuildingHandler(osmium.SimpleHandler):
                     amenity_val = tag.v
                 elif tag.k == "opening_hours" and tag.v:
                     opening_hours = tag.v
+                elif tag.k == "name:en" and tag.v:
+                    name_en = tag.v
+                elif tag.k == "brand" and tag.v:
+                    brand = tag.v
+                elif tag.k == "alt_name" and tag.v:
+                    alt_name = tag.v
 
             # An explicit height always wins; levels are only a fallback.
             if height is None and levels is not None:
                 height = levels * METERS_PER_LEVEL
 
             self.buildings.append(
-                (w.id, ring, btype, height, name, shop, amenity_val, opening_hours)
+                (w.id, ring, btype, height, name, shop, amenity_val, opening_hours,
+                 name_en, brand, alt_name)
             )
         except Exception:
             pass

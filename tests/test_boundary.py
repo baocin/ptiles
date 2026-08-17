@@ -22,7 +22,20 @@ sys.path.insert(0, str(REPO / "scripts"))
 from ptiles.codec import decode_boundary  # noqa: E402
 
 DATA = Path("/mnt/core/kino/ptiles/data")
-SHIKOKU_PLACES = DATA / "states/JP-SHIKOKU.places_v1.ptiles"
+
+
+def _newest(pattern: str) -> Path | None:
+    """Resolve a layer file whatever its version suffix.
+
+    Pinning places_v1 here meant these tests silently started skipping the
+    moment the layer went to v2 -- the exact failure mode they exist to catch.
+    """
+    found = sorted(DATA.glob(pattern))
+    return found[-1] if found else None
+
+
+_sp = _newest("states/JP-SHIKOKU.places_v*.ptiles")
+SHIKOKU_PLACES = _sp if _sp else DATA / "states/JP-SHIKOKU.places_v2.ptiles"
 KANTO_BUILDINGS = DATA / "v4/states/JP-KANTO.buildings_v9.ptiles"
 
 

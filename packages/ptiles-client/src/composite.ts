@@ -40,6 +40,13 @@ const SUFFIXES: Record<string, string[]> = {
   roads: ['highways_v2', 'roads'],
   water: ['water_v1', 'water'],
   business: ['business_v4', 'business'],
+  // v2 of these carries name:en and brand; a v1 file still reads, with the
+  // alternative-name flag bits simply clear.
+  places: ['places_v2', 'places_v1', 'places'],
+  parks: ['parks_v2', 'parks_v1', 'parks'],
+  rail: ['rail_v2', 'rail_v1', 'rail'],
+  trails: ['trails_v2', 'trails_v1', 'trails'],
+  ev: ['ev_v2', 'ev_v1', 'ev'],
 };
 
 /**

@@ -16,7 +16,7 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 
-from ptiles.flightnodes import is_flight_node
+from ptiles.flightnodes import flight_categories, is_flight_node
 from encoding import coord_to_micro
 from shared import write_header, HEADER_SIZE, write_index, train_dictionary
 
@@ -155,21 +155,12 @@ def load_state(st, brand_map, chain_idx):
     ]
 
     records = []
-    dropped_flights = 0
     for i in range(len(t)):
         s = src[i]
         stype = SRC_FOURSQUARE if s == "foursquare" else SRC_OVERTURE
         sname = "foursquare" if s == "foursquare" else "overture"
         sid = ids[i]
         name = names[i] or ""
-        # A departure board is not a set of places. The source data carries one
-        # around every airport -- flight numbers, gates, concourses -- and none
-        # of it is somewhere a person can be routed to. See
-        # `ptiles/flightnodes.py`; the client applies the same rule at read
-        # time so packs already downloaded are clean too.
-        if is_flight_node(name):
-            dropped_flights += 1
-            continue
         brand = ""
         if stype == SRC_OVERTURE and brand_map and sid in brand_map:
             brand = brand_map[sid]
@@ -195,9 +186,41 @@ def load_state(st, brand_map, chain_idx):
                 "chain_count": chain_count,
             }
         )
-    if dropped_flights:
-        print(f"  {st}: dropped {dropped_flights} flight/gate records")
-    return records
+    return _without_flights(st, records)
+
+
+def _without_flights(st, records):
+    """Drop the flights, the gates, and the category that holds them.
+
+    A departure board is not a set of places: the source carries one around
+    every airport, and none of it is somewhere a person can be routed to.
+
+    The category is the real filter and the names are how it is found -- in
+    Tennessee the flight category holds 1,710 records of which only 922 are
+    named recognisably, the rest being `Im On A Plane`, `Seat 3C In First
+    Class`, `First Class`. See `ptiles/flightnodes.py`. The client applies the
+    name half at read time so packs already downloaded improve too, but it
+    cannot do this half: a pack carries a category *index*, numbered per state,
+    and never the label.
+    """
+    categories = flight_categories(records)
+    kept = []
+    by_category = by_name = 0
+    for rec in records:
+        if rec["primary_category"] in categories:
+            by_category += 1
+        elif is_flight_node(rec["name"]):
+            by_name += 1
+        else:
+            kept.append(rec)
+    if by_category or by_name:
+        print(
+            f"  {st}: dropped {by_category + by_name} flight records "
+            f"({by_category} by category, {by_name} by name); "
+            f"flight categories: {sorted(categories) or 'none'}",
+            flush=True,
+        )
+    return kept
 
 
 def encode_v4(rec, uid: int, cat_idx: dict, cell_center_micro: tuple) -> bytes:

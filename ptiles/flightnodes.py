@@ -58,6 +58,53 @@ _AIRSIDE = re.compile(
 )
 
 
+# A category is a flight bucket when most of what it holds is named like a
+# flight. Below this share it is left alone.
+#
+# The categories are the decisive signal and the names are only how the
+# categories are found. In the Tennessee pack one category holds 1,710 records,
+# 922 of them named like flights (54%); the remaining 788 are the same thing
+# written in ways no pattern catches -- `Im On A Plane`, `Seat 3C In First
+# Class`, `Flight To Des Moines`, `First Class`, `The Brink Of Destruction`.
+# Dropping the category takes all 1,710.
+#
+# Detected rather than named, because a category's label is not knowable in
+# advance and its *index* is per-state: `build_full_ptilesb.py` numbers
+# categories by frequency rank within each state
+# (`cat_idx = {c: i + 1 for i, (c, _) in enumerate(sorted_cats[:254])}`), so
+# index 94 in Tennessee is a different category in Georgia. This is also why
+# the filter cannot run on the phone: the client sees an index, never a label.
+FLIGHT_CATEGORY_SHARE = 0.4
+
+# Below this, a category is too small for its share to mean anything: three
+# records of which two are `AA 100` says nothing about the category.
+FLIGHT_CATEGORY_MIN = 50
+
+
+def flight_categories(records) -> set[str]:
+    """Category labels whose records are overwhelmingly flights.
+
+    `records` is any iterable of dicts with `primary_category` and `name`.
+    """
+    from collections import Counter
+
+    total: Counter[str] = Counter()
+    flights: Counter[str] = Counter()
+    for rec in records:
+        category = rec.get("primary_category") or ""
+        if not category:
+            continue
+        total[category] += 1
+        if is_flight_node(rec.get("name")):
+            flights[category] += 1
+    return {
+        category
+        for category, count in total.items()
+        if count >= FLIGHT_CATEGORY_MIN
+        and flights[category] / count >= FLIGHT_CATEGORY_SHARE
+    }
+
+
 def is_flight_node(name: str | None) -> bool:
     """True when a name says the record is a flight or a gate, not a place."""
     if not name:

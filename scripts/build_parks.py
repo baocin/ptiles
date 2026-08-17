@@ -122,10 +122,32 @@ def encode_coordinates(coords):
     return bytes(buf)
 
 
+# A vertex count wider than the field silently truncates: parks writes u8 with a
+# 255 escape to u16, so a 98,574-vertex relation encodes as 33,038 and the reader
+# then consumes too few coordinates and desyncs the rest of the cell. Ways cannot
+# exceed 2,000 nodes, but an assembled relation can -- two Japanese park
+# relations do. Decimate to fit, the way encode_v8 already does for its u8 field.
+MAX_VERTICES = 0xFFFF - 1
+
+
+def _fit_vertices(coords):
+    """Decimate a ring so its length fits the vertex-count field."""
+    if len(coords) <= MAX_VERTICES:
+        return coords
+    step = (len(coords) + MAX_VERTICES - 1) // MAX_VERTICES
+    thinned = coords[::step]
+    # Keep the ring closed: dropping the last vertex opens the polygon.
+    if thinned[0] != coords[-1]:
+        thinned = thinned + [coords[-1]]
+    return thinned
+
+
 def enc(feat, pid):
     buf = bytearray()
     buf.extend(encode_varint(zigzag_encode(feat["osm_id"] - pid)))
-    n = len(feat["coords"])
+    coords = _fit_vertices(list(feat["coords"]))
+    feat = {**feat, "coords": coords}
+    n = len(coords)
     buf.append(n if n < 256 else 255)
     if n >= 256:
         buf.append(n & 0xFF)

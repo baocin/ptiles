@@ -125,6 +125,23 @@ def classify_water_type(tags: dict) -> int:
     return WATER_TYPES["lake"]
 
 
+# Same trap as build_parks: the vertex count is u16, and a relation-assembled
+# coastline or lake can exceed 65,535 vertices, at which point struct.pack("<H")
+# raises rather than truncating -- but the record is then dropped by the caller's
+# error handling instead of being written short. Decimate to fit.
+WATER_MAX_VERTICES = 0xFFFF - 1
+
+
+def _fit_vertices(coords):
+    if len(coords) <= WATER_MAX_VERTICES:
+        return coords
+    step = (len(coords) + WATER_MAX_VERTICES - 1) // WATER_MAX_VERTICES
+    thinned = coords[::step]
+    if thinned[-1] != coords[-1]:
+        thinned = thinned + [coords[-1]]
+    return thinned
+
+
 def encode_water_record(feature: dict, prev_osm_id: int) -> tuple[bytes, int]:
     """Encode a single water feature record. Returns (bytes, new_prev_osm_id)."""
     buf = bytearray()
@@ -143,7 +160,7 @@ def encode_water_record(feature: dict, prev_osm_id: int) -> tuple[bytes, int]:
         # Reference: just u32 feature_id
         buf.extend(struct.pack("<I", feature["ref_feature_id"]))
     else:
-        coords = feature["coords"]
+        coords = _fit_vertices(feature["coords"])
         vertex_count = len(coords)
         buf.extend(struct.pack("<H", vertex_count))
 

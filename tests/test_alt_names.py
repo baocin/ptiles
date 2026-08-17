@@ -25,15 +25,34 @@ sys.path.insert(0, str(REPO / "scripts"))
 DATA = Path("/mnt/core/kino/ptiles/data")
 
 
+# Scope-agnostic on purpose. These tests were written against JP-SHIKOKU and
+# silently went to 14 skips the moment those test artifacts were cleaned up --
+# the same failure mode they exist to catch. Try the regional scope, then the
+# country-wide one, and take whichever the build actually produced.
+SCOPES = ("JP-SHIKOKU", "JP")
+
+
 def newest(pattern: str):
-    found = sorted(DATA.glob(pattern))
-    return found[-1] if found else None
+    """Resolve `states/{scope}.{layer}_v*.ptiles` for whichever scope exists."""
+    for scope in SCOPES:
+        found = sorted(DATA.glob(pattern.replace("{scope}", scope)))
+        if found:
+            return found[-1]
+    return None
 
 
 # --- buildings: appended, no version bump ---------------------------------
 
 
-BUILDINGS = DATA / "v4/states/JP-SHIKOKU.buildings_v9.ptiles"
+def _buildings():
+    for scope in SCOPES:
+        p = DATA / f"v4/states/{scope}.buildings_v9.ptiles"
+        if p.exists():
+            return p
+    return DATA / "v4/states/JP-SHIKOKU.buildings_v9.ptiles"
+
+
+BUILDINGS = _buildings()
 
 
 @pytest.mark.skipif(not BUILDINGS.exists(), reason="Shikoku buildings not built")
@@ -97,7 +116,7 @@ def test_v2_layers_declare_version_2(layer, module, cls_name):
     reader pointed at a v2 file would desync rather than skip."""
     import importlib
 
-    path = newest(f"states/JP-SHIKOKU.{layer}_v*.ptiles")
+    path = newest(f"states/{{scope}}.{layer}_v*.ptiles")
     if path is None:
         pytest.skip(f"{layer} not built for Shikoku")
     reader = getattr(importlib.import_module(module), cls_name).open(path)
@@ -111,7 +130,7 @@ def test_v2_records_decode_cleanly(layer, module, cls_name):
     the check that every field width is right."""
     import importlib
 
-    path = newest(f"states/JP-SHIKOKU.{layer}_v*.ptiles")
+    path = newest(f"states/{{scope}}.{layer}_v*.ptiles")
     if path is None:
         pytest.skip(f"{layer} not built for Shikoku")
     reader = getattr(importlib.import_module(module), cls_name).open(path)
@@ -126,7 +145,7 @@ def test_rail_has_english_names_for_most_lines():
     which is what makes 'Naruto Line' findable from JR鳴門線."""
     from ptiles.rail import RailReader
 
-    path = newest("states/JP-SHIKOKU.rail_v*.ptiles")
+    path = newest("states/{scope}.rail_v*.ptiles")
     if path is None:
         pytest.skip("rail not built")
     r = RailReader.open(path)
@@ -144,7 +163,7 @@ def test_rail_has_english_names_for_most_lines():
 def test_places_alt_names_are_populated():
     from ptiles.places import PlacesReader
 
-    path = newest("states/JP-SHIKOKU.places_v*.ptiles")
+    path = newest("states/{scope}.places_v*.ptiles")
     if path is None:
         pytest.skip("places not built")
     r = PlacesReader.open(path)
@@ -200,8 +219,8 @@ def test_trail_park_ids_agree_with_the_parks_layer():
     from ptiles.parks import ParkReader
     from ptiles.trails import TrailsReader
 
-    tp = newest("states/JP-SHIKOKU.trails_v*.ptiles")
-    pp = newest("states/JP-SHIKOKU.parks_v*.ptiles")
+    tp = newest("states/{scope}.trails_v*.ptiles")
+    pp = newest("states/{scope}.parks_v*.ptiles")
     if tp is None or pp is None:
         pytest.skip("trails or parks not built for Shikoku")
 
@@ -230,7 +249,7 @@ def test_most_trails_are_not_in_a_park():
     or nothing were tagged, the containment test would be the suspect."""
     from ptiles.trails import TrailsReader
 
-    tp = newest("states/JP-SHIKOKU.trails_v*.ptiles")
+    tp = newest("states/{scope}.trails_v*.ptiles")
     if tp is None:
         pytest.skip("trails not built")
     reader = TrailsReader.open(tp)
@@ -242,3 +261,45 @@ def test_most_trails_are_not_in_a_park():
                 tagged += 1
     assert total
     assert 0 < tagged < total * 0.5, f"{tagged} of {total} trails tagged"
+
+
+# --- vertex-count overflow (pre-existing, found during the Japan rebuild) ---
+
+
+def test_parks_vertex_count_fits_its_field():
+    """A ring longer than the u16 escape silently truncated the count.
+
+    parks writes u8 with a 255 escape to u16 via `n & 0xFF, (n >> 8) & 0xFF`, so
+    a 98,574-vertex relation encoded as 33,038. The reader then consumed too few
+    coordinates and desynced the remainder of the cell -- two Japanese park
+    relations did exactly that, losing 7 records and, because the trails build
+    reads the parks file, failing the whole trails stage.
+
+    Ways cannot exceed 2,000 nodes; assembled relations can.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    from build_parks import MAX_VERTICES, _fit_vertices
+
+    ring = [(i * 0.0001, i * 0.0001) for i in range(98_574)]
+    ring.append(ring[0])
+    fitted = _fit_vertices(ring)
+    n = len(fitted)
+    assert n <= MAX_VERTICES
+    # The count has to survive the u16 escape it will be written through.
+    assert (((n >> 8) & 0xFF) << 8 | (n & 0xFF)) == n
+    # And the ring must stay closed.
+    assert fitted[-1] == ring[-1]
+
+    small = [(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)]
+    assert _fit_vertices(small) is small, "small rings must pass through untouched"
+
+
+def test_water_vertex_count_fits_its_field():
+    """Same trap, same relation-assembled geometry."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    from build_water import WATER_MAX_VERTICES, _fit_vertices
+
+    ring = [(i * 0.0001, i * 0.0001) for i in range(200_000)]
+    fitted = _fit_vertices(ring)
+    assert len(fitted) <= WATER_MAX_VERTICES
+    assert fitted[-1] == ring[-1]

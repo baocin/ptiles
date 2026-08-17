@@ -18,6 +18,7 @@ from boundaries import stamp_boundary
 from states import get_state
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 
+from ptiles.categories import GROUPS, canonical, group_of
 from ptiles.dedupe import dedupe
 from ptiles.flightnodes import flight_categories, is_flight_node
 from encoding import coord_to_micro
@@ -325,6 +326,70 @@ def encode_v4(rec, uid: int, cat_idx: dict, cell_center_micro: tuple) -> bytes:
     return bytes(buf)
 
 
+
+# Aux section magic: the category table a pack carries about itself.
+CATEGORY_AUX_MAGIC = b"PTCT"
+# Byte offset of aux_offset in the 256-byte header; aux_length follows it.
+AUX_OFFSET_FIELD = 72
+CATEGORY_AUX_VERSION = 1
+
+
+def build_id(state: str, labels: list[str], record_count: int) -> str:
+    """A short stamp identifying this build of this state.
+
+    Derived from what the build produced rather than from the clock, so two
+    runs over the same input agree and a reader can tell whether a sidecar
+    belongs to a pack. The category *numbering* is what drifts -- it is a
+    frequency rank within one state's build -- so the labels in rank order are
+    exactly the thing worth hashing.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    digest.update(state.encode())
+    digest.update(str(record_count).encode())
+    for label in labels:
+        digest.update(b"\x00")
+        digest.update(label.encode())
+    return digest.hexdigest()[:12]
+
+
+def category_aux(state: str, cat_idx: dict, record_count: int) -> bytes:
+    """The category table, to be carried inside the pack.
+
+    A pack that names its own categories cannot drift from a sidecar, because
+    there is nothing to pair it with. Measured on the published Tennessee file
+    this is about 6 KB against 54 MB, and it is what lets a client show
+    "Elementary School" instead of `business:94`, or filter by category at
+    all -- today it can read the number and nothing else.
+
+    Layout, little-endian:
+
+        magic   4  b"PTCT"
+        version 1
+        build   1 + n   short stamp, see `build_id`
+        count   2       number of entries
+        entry   1 index, 1 group, 1 label length, n label bytes
+    """
+    ordered = sorted(cat_idx.items(), key=lambda kv: kv[1])
+    labels = [label for label, _ in ordered]
+    stamp = build_id(state, labels, record_count).encode()
+
+    out = bytearray(CATEGORY_AUX_MAGIC)
+    out.append(CATEGORY_AUX_VERSION)
+    out.append(len(stamp))
+    out.extend(stamp)
+    out.extend(len(ordered).to_bytes(2, "little"))
+    for label, index in ordered:
+        leaf = canonical(label).encode("utf-8")[:255]
+        group = GROUPS.index(group_of(label))
+        out.append(index)
+        out.append(group)
+        out.append(len(leaf))
+        out.extend(leaf)
+    return bytes(out)
+
+
 def build_state_ptiles(state, brand_map, chain_idx):
     st_t0 = time.time()
     print(f"\n=== {state} ===", flush=True)
@@ -434,6 +499,11 @@ def build_state_ptiles(state, brand_map, chain_idx):
         write_index(f, index_entries)
         for e in index_entries:
             f.write(compressed[e["h3_cell"]])
+        # The category table goes last, so the offsets above are unaffected and
+        # a reader that ignores aux reads exactly the file it read before.
+        aux_offset = f.tell()
+        aux = category_aux(state, cat_idx, len(records))
+        f.write(aux)
 
     # Fix offsets
     idx_pos = io + 4
@@ -442,6 +512,13 @@ def build_state_ptiles(state, brand_map, chain_idx):
             f.seek(idx_pos + 8)
             f.write((bo + e["block_offset"]).to_bytes(6, "little"))
             idx_pos += 19
+        # aux_offset (u64) and aux_length (u32) sit at bytes 72 and 80 of the
+        # 256-byte header -- taken from the reader that has to agree,
+        # core/src/header.rs, not from counting the struct by eye. They are
+        # only known once the table has been written.
+        f.seek(AUX_OFFSET_FIELD)
+        f.write(aux_offset.to_bytes(8, "little"))
+        f.write(len(aux).to_bytes(4, "little"))
 
     # Boundary last: it goes on the end of the file, after the offset fix-up
     # above has finished rewriting the index in place.

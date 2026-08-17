@@ -1,0 +1,889 @@
+{
+ "labels": {
+  "accounting_and_bookkeeping_service": {
+   "group": "business_and_professional_services",
+   "id": 17
+  },
+  "advertising_agency": {
+   "group": "business_and_professional_services",
+   "id": 4
+  },
+  "agriculture_and_forestry_service": {
+   "group": "business_and_professional_services",
+   "id": 5
+  },
+  "american_restaurant": {
+   "group": "dining_and_drinking",
+   "id": 79
+  },
+  "antique_store": {
+   "group": "retail",
+   "id": 109
+  },
+  "apartment_or_condo": {
+   "group": "community_and_government",
+   "id": 68
+  },
+  "art_gallery": {
+   "group": "arts_and_entertainment",
+   "id": 1
+  },
+  "arts_and_crafts_store": {
+   "group": "retail",
+   "id": 110
+  },
+  "arts_and_entertainment": {
+   "group": "arts_and_entertainment",
+   "id": 158
+  },
+  "atm": {
+   "group": "business_and_professional_services",
+   "id": 18
+  },
+  "atms": {
+   "group": "business_and_professional_services",
+   "id": 165
+  },
+  "automotive_parts_and_accessories": {
+   "group": "retail",
+   "id": 166
+  },
+  "automotive_repair": {
+   "group": "business_and_professional_services",
+   "id": 167
+  },
+  "automotive_repair_shop": {
+   "group": "business_and_professional_services",
+   "id": 6
+  },
+  "bakery": {
+   "group": "dining_and_drinking",
+   "id": 71
+  },
+  "bank": {
+   "group": "business_and_professional_services",
+   "id": 19
+  },
+  "bank_credit_union": {
+   "group": "business_and_professional_services",
+   "id": 168
+  },
+  "banks": {
+   "group": "business_and_professional_services",
+   "id": 169
+  },
+  "baptist_church": {
+   "group": "community_and_government",
+   "id": 170
+  },
+  "bar": {
+   "group": "dining_and_drinking",
+   "id": 72
+  },
+  "barber": {
+   "group": "business_and_professional_services",
+   "id": 171
+  },
+  "baseball_field": {
+   "group": "sports_and_recreation",
+   "id": 141
+  },
+  "bbq_joint": {
+   "group": "dining_and_drinking",
+   "id": 81
+  },
+  "beauty_and_spa": {
+   "group": "business_and_professional_services",
+   "id": 172
+  },
+  "beauty_salon": {
+   "group": "business_and_professional_services",
+   "id": 173
+  },
+  "bed_and_breakfast": {
+   "group": "travel_and_transportation",
+   "id": 147
+  },
+  "boutique": {
+   "group": "retail",
+   "id": 114
+  },
+  "building_supply_store": {
+   "group": "retail",
+   "id": 174
+  },
+  "burger_joint": {
+   "group": "dining_and_drinking",
+   "id": 82
+  },
+  "business_and_professional_services": {
+   "group": "business_and_professional_services",
+   "id": 159
+  },
+  "business_and_strategy_consulting_office": {
+   "group": "business_and_professional_services",
+   "id": 43
+  },
+  "business_service": {
+   "group": "business_and_professional_services",
+   "id": 8
+  },
+  "cabin": {
+   "group": "travel_and_transportation",
+   "id": 175
+  },
+  "caf": {
+   "group": "dining_and_drinking",
+   "id": 74
+  },
+  "campground": {
+   "group": "landmarks_and_outdoors",
+   "id": 97
+  },
+  "car_dealer": {
+   "group": "retail",
+   "id": 176
+  },
+  "car_dealership": {
+   "group": "retail",
+   "id": 111
+  },
+  "car_parts_and_accessories": {
+   "group": "retail",
+   "id": 113
+  },
+  "car_wash_and_detail": {
+   "group": "business_and_professional_services",
+   "id": 7
+  },
+  "carpet_and_flooring_contractor": {
+   "group": "business_and_professional_services",
+   "id": 30
+  },
+  "cemetery": {
+   "group": "community_and_government",
+   "id": 51
+  },
+  "chemicals_and_gasses_manufacturer": {
+   "group": "business_and_professional_services",
+   "id": 9
+  },
+  "chinese_restaurant": {
+   "group": "dining_and_drinking",
+   "id": 80
+  },
+  "chiropractor": {
+   "group": "health_and_medicine",
+   "id": 88
+  },
+  "church": {
+   "group": "community_and_government",
+   "id": 70
+  },
+  "church_cathedral": {
+   "group": "community_and_government",
+   "id": 177
+  },
+  "city": {
+   "group": "landmarks_and_outdoors",
+   "id": 106
+  },
+  "clothing_store": {
+   "group": "retail",
+   "id": 122
+  },
+  "coffee_shop": {
+   "group": "dining_and_drinking",
+   "id": 75
+  },
+  "college_and_university": {
+   "group": "community_and_government",
+   "id": 53
+  },
+  "college_classroom": {
+   "group": "community_and_government",
+   "id": 54
+  },
+  "college_residence_hall": {
+   "group": "community_and_government",
+   "id": 55
+  },
+  "college_university": {
+   "group": "community_and_government",
+   "id": 178
+  },
+  "community_and_government": {
+   "group": "community_and_government",
+   "id": 160
+  },
+  "community_services_non_profits": {
+   "group": "community_and_government",
+   "id": 179
+  },
+  "computer_repair_service": {
+   "group": "business_and_professional_services",
+   "id": 11
+  },
+  "construction": {
+   "group": "business_and_professional_services",
+   "id": 12
+  },
+  "construction_services": {
+   "group": "business_and_professional_services",
+   "id": 180
+  },
+  "construction_supplies_store": {
+   "group": "retail",
+   "id": 117
+  },
+  "contractor": {
+   "group": "business_and_professional_services",
+   "id": 181
+  },
+  "convenience_store": {
+   "group": "retail",
+   "id": 118
+  },
+  "cosmetics_store": {
+   "group": "retail",
+   "id": 119
+  },
+  "counseling_and_mental_health": {
+   "group": "health_and_medicine",
+   "id": 182
+  },
+  "coworking_space": {
+   "group": "business_and_professional_services",
+   "id": 44
+  },
+  "credit_union": {
+   "group": "business_and_professional_services",
+   "id": 20
+  },
+  "daycare": {
+   "group": "business_and_professional_services",
+   "id": 10
+  },
+  "dentist": {
+   "group": "health_and_medicine",
+   "id": 89
+  },
+  "department_store": {
+   "group": "retail",
+   "id": 120
+  },
+  "discount_store": {
+   "group": "retail",
+   "id": 121
+  },
+  "doctor": {
+   "group": "health_and_medicine",
+   "id": 183
+  },
+  "doctor_s_office": {
+   "group": "health_and_medicine",
+   "id": 95
+  },
+  "education": {
+   "group": "community_and_government",
+   "id": 52
+  },
+  "electrician": {
+   "group": "business_and_professional_services",
+   "id": 31
+  },
+  "electronics_store": {
+   "group": "retail",
+   "id": 115
+  },
+  "elementary_school": {
+   "group": "community_and_government",
+   "id": 56
+  },
+  "employment_agency": {
+   "group": "business_and_professional_services",
+   "id": 13
+  },
+  "event_planning": {
+   "group": "business_and_professional_services",
+   "id": 184
+  },
+  "event_space": {
+   "group": "business_and_professional_services",
+   "id": 14
+  },
+  "factory": {
+   "group": "business_and_professional_services",
+   "id": 15
+  },
+  "family_practice": {
+   "group": "health_and_medicine",
+   "id": 185
+  },
+  "farm": {
+   "group": "landmarks_and_outdoors",
+   "id": 98
+  },
+  "fast_food_restaurant": {
+   "group": "dining_and_drinking",
+   "id": 83
+  },
+  "field": {
+   "group": "landmarks_and_outdoors",
+   "id": 99
+  },
+  "financial_planner": {
+   "group": "business_and_professional_services",
+   "id": 21
+  },
+  "financial_service": {
+   "group": "business_and_professional_services",
+   "id": 16
+  },
+  "fire_department": {
+   "group": "community_and_government",
+   "id": 186
+  },
+  "fire_station": {
+   "group": "community_and_government",
+   "id": 60
+  },
+  "flower_store": {
+   "group": "retail",
+   "id": 126
+  },
+  "flowers_and_gifts_shop": {
+   "group": "retail",
+   "id": 187
+  },
+  "food_truck": {
+   "group": "dining_and_drinking",
+   "id": 77
+  },
+  "freight_and_cargo_service": {
+   "group": "business_and_professional_services",
+   "id": 188
+  },
+  "fuel_station": {
+   "group": "travel_and_transportation",
+   "id": 146
+  },
+  "funeral_home": {
+   "group": "business_and_professional_services",
+   "id": 23
+  },
+  "furniture_and_home_store": {
+   "group": "retail",
+   "id": 129
+  },
+  "furniture_store": {
+   "group": "retail",
+   "id": 189
+  },
+  "garden_center": {
+   "group": "retail",
+   "id": 130
+  },
+  "gas_station": {
+   "group": "travel_and_transportation",
+   "id": 190
+  },
+  "general_contractor": {
+   "group": "business_and_professional_services",
+   "id": 32
+  },
+  "gift_store": {
+   "group": "retail",
+   "id": 131
+  },
+  "golf_course": {
+   "group": "sports_and_recreation",
+   "id": 142
+  },
+  "government_building": {
+   "group": "community_and_government",
+   "id": 58
+  },
+  "government_department": {
+   "group": "community_and_government",
+   "id": 59
+  },
+  "grocery_store": {
+   "group": "retail",
+   "id": 127
+  },
+  "gym": {
+   "group": "sports_and_recreation",
+   "id": 144
+  },
+  "gym_and_studio": {
+   "group": "sports_and_recreation",
+   "id": 143
+  },
+  "hair_salon": {
+   "group": "business_and_professional_services",
+   "id": 25
+  },
+  "hardware_store": {
+   "group": "retail",
+   "id": 132
+  },
+  "health_and_beauty_service": {
+   "group": "business_and_professional_services",
+   "id": 24
+  },
+  "health_and_medical": {
+   "group": "health_and_medicine",
+   "id": 191
+  },
+  "health_and_medicine": {
+   "group": "health_and_medicine",
+   "id": 161
+  },
+  "heating_ventilating_and_air_conditioning_contractor": {
+   "group": "business_and_professional_services",
+   "id": 33
+  },
+  "high_school": {
+   "group": "community_and_government",
+   "id": 57
+  },
+  "hiking_trail": {
+   "group": "landmarks_and_outdoors",
+   "id": 100
+  },
+  "holiday_rental_home": {
+   "group": "travel_and_transportation",
+   "id": 192
+  },
+  "home_health_care": {
+   "group": "health_and_medicine",
+   "id": 193
+  },
+  "home_improvement_service": {
+   "group": "business_and_professional_services",
+   "id": 29
+  },
+  "home_service": {
+   "group": "business_and_professional_services",
+   "id": 34
+  },
+  "hospital": {
+   "group": "health_and_medicine",
+   "id": 90
+  },
+  "hotel": {
+   "group": "travel_and_transportation",
+   "id": 148
+  },
+  "housing_development": {
+   "group": "community_and_government",
+   "id": 63
+  },
+  "hvac_services": {
+   "group": "business_and_professional_services",
+   "id": 194
+  },
+  "ice_cream_parlor": {
+   "group": "dining_and_drinking",
+   "id": 76
+  },
+  "industrial_equipment": {
+   "group": "business_and_professional_services",
+   "id": 195
+  },
+  "industrial_equipment_supplier": {
+   "group": "business_and_professional_services",
+   "id": 38
+  },
+  "insurance_agency": {
+   "group": "business_and_professional_services",
+   "id": 39
+  },
+  "intersection": {
+   "group": "travel_and_transportation",
+   "id": 155
+  },
+  "italian_restaurant": {
+   "group": "dining_and_drinking",
+   "id": 84
+  },
+  "jewelry_store": {
+   "group": "retail",
+   "id": 123
+  },
+  "lake": {
+   "group": "landmarks_and_outdoors",
+   "id": 101
+  },
+  "landmark_and_historical_building": {
+   "group": "landmarks_and_outdoors",
+   "id": 196
+  },
+  "landscaper_and_gardener": {
+   "group": "business_and_professional_services",
+   "id": 35
+  },
+  "landscaping": {
+   "group": "business_and_professional_services",
+   "id": 197
+  },
+  "laundry_service": {
+   "group": "business_and_professional_services",
+   "id": 40
+  },
+  "law_office": {
+   "group": "business_and_professional_services",
+   "id": 41
+  },
+  "lawyer": {
+   "group": "business_and_professional_services",
+   "id": 198
+  },
+  "liquor_store": {
+   "group": "retail",
+   "id": 128
+  },
+  "loans_agency": {
+   "group": "business_and_professional_services",
+   "id": 22
+  },
+  "lounge": {
+   "group": "dining_and_drinking",
+   "id": 73
+  },
+  "massage_clinic": {
+   "group": "business_and_professional_services",
+   "id": 26
+  },
+  "medical_center": {
+   "group": "health_and_medicine",
+   "id": 91
+  },
+  "mental_health_clinic": {
+   "group": "health_and_medicine",
+   "id": 92
+  },
+  "mexican_restaurant": {
+   "group": "dining_and_drinking",
+   "id": 85
+  },
+  "miscellaneous_store": {
+   "group": "retail",
+   "id": 133
+  },
+  "mobile_phone_store": {
+   "group": "retail",
+   "id": 116
+  },
+  "money_transfer_services": {
+   "group": "business_and_professional_services",
+   "id": 199
+  },
+  "motel": {
+   "group": "travel_and_transportation",
+   "id": 149
+  },
+  "mountain": {
+   "group": "landmarks_and_outdoors",
+   "id": 200
+  },
+  "moving_target": {
+   "group": "travel_and_transportation",
+   "id": 152
+  },
+  "music_venue": {
+   "group": "arts_and_entertainment",
+   "id": 3
+  },
+  "nail_salon": {
+   "group": "business_and_professional_services",
+   "id": 27
+  },
+  "neighborhood": {
+   "group": "landmarks_and_outdoors",
+   "id": 107
+  },
+  "night_club": {
+   "group": "arts_and_entertainment",
+   "id": 2
+  },
+  "non_profit_organization": {
+   "group": "community_and_government",
+   "id": 65
+  },
+  "office": {
+   "group": "business_and_professional_services",
+   "id": 42
+  },
+  "organization": {
+   "group": "community_and_government",
+   "id": 64
+  },
+  "other_great_outdoors": {
+   "group": "landmarks_and_outdoors",
+   "id": 102
+  },
+  "park": {
+   "group": "landmarks_and_outdoors",
+   "id": 103
+  },
+  "parking": {
+   "group": "travel_and_transportation",
+   "id": 153
+  },
+  "pet_service": {
+   "group": "business_and_professional_services",
+   "id": 45
+  },
+  "pet_supplies_store": {
+   "group": "retail",
+   "id": 134
+  },
+  "pharmacy": {
+   "group": "retail",
+   "id": 135
+  },
+  "physical_therapy": {
+   "group": "health_and_medicine",
+   "id": 201
+  },
+  "physical_therapy_clinic": {
+   "group": "health_and_medicine",
+   "id": 93
+  },
+  "physician": {
+   "group": "health_and_medicine",
+   "id": 94
+  },
+  "pizza_restaurant": {
+   "group": "dining_and_drinking",
+   "id": 202
+  },
+  "pizzeria": {
+   "group": "dining_and_drinking",
+   "id": 86
+  },
+  "plane": {
+   "group": "travel_and_transportation",
+   "id": 156
+  },
+  "playground": {
+   "group": "landmarks_and_outdoors",
+   "id": 104
+  },
+  "plumber": {
+   "group": "business_and_professional_services",
+   "id": 36
+  },
+  "police_station": {
+   "group": "community_and_government",
+   "id": 61
+  },
+  "polling_place": {
+   "group": "community_and_government",
+   "id": 66
+  },
+  "post_office": {
+   "group": "community_and_government",
+   "id": 62
+  },
+  "print_store": {
+   "group": "retail",
+   "id": 136
+  },
+  "printing_services": {
+   "group": "business_and_professional_services",
+   "id": 203
+  },
+  "professional_cleaning_service": {
+   "group": "business_and_professional_services",
+   "id": 37
+  },
+  "professional_services": {
+   "group": "business_and_professional_services",
+   "id": 204
+  },
+  "propane_supplier": {
+   "group": "business_and_professional_services",
+   "id": 205
+  },
+  "property_management_office": {
+   "group": "business_and_professional_services",
+   "id": 47
+  },
+  "public_and_government_association": {
+   "group": "community_and_government",
+   "id": 206
+  },
+  "public_and_social_service": {
+   "group": "community_and_government",
+   "id": 67
+  },
+  "public_service_and_government": {
+   "group": "community_and_government",
+   "id": 207
+  },
+  "real_estate": {
+   "group": "business_and_professional_services",
+   "id": 208
+  },
+  "real_estate_agency": {
+   "group": "business_and_professional_services",
+   "id": 48
+  },
+  "real_estate_agent": {
+   "group": "business_and_professional_services",
+   "id": 209
+  },
+  "real_estate_service": {
+   "group": "business_and_professional_services",
+   "id": 46
+  },
+  "religious_organization": {
+   "group": "community_and_government",
+   "id": 210
+  },
+  "rental_car_location": {
+   "group": "travel_and_transportation",
+   "id": 157
+  },
+  "resort": {
+   "group": "travel_and_transportation",
+   "id": 150
+  },
+  "restaurant": {
+   "group": "dining_and_drinking",
+   "id": 78
+  },
+  "retail": {
+   "group": "retail",
+   "id": 162
+  },
+  "retirement_home": {
+   "group": "community_and_government",
+   "id": 211
+  },
+  "road": {
+   "group": "travel_and_transportation",
+   "id": 154
+  },
+  "roofing": {
+   "group": "business_and_professional_services",
+   "id": 212
+  },
+  "sandwich_spot": {
+   "group": "dining_and_drinking",
+   "id": 87
+  },
+  "scenic_lookout": {
+   "group": "landmarks_and_outdoors",
+   "id": 105
+  },
+  "school": {
+   "group": "community_and_government",
+   "id": 213
+  },
+  "self_storage_facility": {
+   "group": "business_and_professional_services",
+   "id": 214
+  },
+  "shipping_freight_and_material_transportation_service": {
+   "group": "business_and_professional_services",
+   "id": 49
+  },
+  "shoe_store": {
+   "group": "retail",
+   "id": 124
+  },
+  "shopping": {
+   "group": "retail",
+   "id": 215
+  },
+  "smoke_shop": {
+   "group": "retail",
+   "id": 137
+  },
+  "spa": {
+   "group": "business_and_professional_services",
+   "id": 28
+  },
+  "spiritual_center": {
+   "group": "community_and_government",
+   "id": 69
+  },
+  "sporting_goods_retail": {
+   "group": "retail",
+   "id": 138
+  },
+  "sports_and_recreation": {
+   "group": "sports_and_recreation",
+   "id": 163
+  },
+  "storage_facility": {
+   "group": "business_and_professional_services",
+   "id": 50
+  },
+  "structure": {
+   "group": "landmarks_and_outdoors",
+   "id": 108
+  },
+  "swimming_pool": {
+   "group": "sports_and_recreation",
+   "id": 145
+  },
+  "tattoo_and_piercing": {
+   "group": "business_and_professional_services",
+   "id": 216
+  },
+  "thrift_store": {
+   "group": "retail",
+   "id": 217
+  },
+  "tire_dealer_and_repair": {
+   "group": "business_and_professional_services",
+   "id": 218
+  },
+  "travel_and_transportation": {
+   "group": "travel_and_transportation",
+   "id": 164
+  },
+  "truck_rentals": {
+   "group": "travel_and_transportation",
+   "id": 219
+  },
+  "used_car_dealer": {
+   "group": "retail",
+   "id": 220
+  },
+  "used_car_dealership": {
+   "group": "retail",
+   "id": 112
+  },
+  "vacation_rental": {
+   "group": "travel_and_transportation",
+   "id": 151
+  },
+  "veterinarian": {
+   "group": "health_and_medicine",
+   "id": 96
+  },
+  "video_store": {
+   "group": "retail",
+   "id": 139
+  },
+  "vintage_and_thrift_store": {
+   "group": "retail",
+   "id": 140
+  },
+  "women_s_store": {
+   "group": "retail",
+   "id": 125
+  },
+  "womens_clothing_store": {
+   "group": "retail",
+   "id": 221
+  }
+ },
+ "next_id": 222
+}

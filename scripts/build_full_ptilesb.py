@@ -352,7 +352,7 @@ CATEGORY_AUX_MAGIC = b"PTCT"
 CATEGORY_OTHER = 255
 # Byte offset of aux_offset in the 256-byte header; aux_length follows it.
 AUX_OFFSET_FIELD = 72
-CATEGORY_AUX_VERSION = 1
+CATEGORY_AUX_VERSION = 2
 
 
 def build_id(state: str, labels: list[str], record_count: int) -> str:
@@ -384,34 +384,46 @@ def category_aux(state: str, cat_idx: dict, record_count: int) -> bytes:
     "Elementary School" instead of `business:94`, or filter by category at
     all -- today it can read the number and nothing else.
 
+    The *group vocabulary* is written first, and each entry then refers to it
+    by position. Version 1 of this section wrote a bare group byte against a
+    list of names compiled into the reader, which is the same mistake one level
+    up: two lists in two languages that must agree, where a divergence shifts
+    every group silently. A file that carries its own vocabulary cannot
+    disagree with anything, and a group added later costs no client change.
+
     Layout, little-endian:
 
-        magic   4  b"PTCT"
-        version 1
-        build   1 + n   short stamp, see `build_id`
-        count   2       number of entries
-        entry   1 index, 1 group, 1 label length, n label bytes
+        magic    4  b"PTCT"
+        version  1  = 2
+        build    1 + n   short stamp, see `build_id`
+        groups   1 count, then per group: 1 length, n bytes
+        count    2       number of categories
+        entry    1 index, 1 group position, 1 label length, n label bytes
     """
     ordered = sorted(cat_idx.items(), key=lambda kv: kv[1])
     labels = [label for label, _ in ordered]
+    stamp = build_id(state, labels, record_count).encode()
     # 255 is a category like any other as far as a reader is concerned, and it
     # has to be named or the byte resolves to nothing.
     ordered = ordered + [("other", CATEGORY_OTHER)]
     # A bare label inherits the family of the path naming the same leaf, read
     # off this build's own vocabulary rather than remembered between builds.
     learned = learn_groups(labels)
-    stamp = build_id(state, labels, record_count).encode()
 
     out = bytearray(CATEGORY_AUX_MAGIC)
     out.append(CATEGORY_AUX_VERSION)
     out.append(len(stamp))
     out.extend(stamp)
+    out.append(len(GROUPS))
+    for group in GROUPS:
+        encoded = group.encode("utf-8")
+        out.append(len(encoded))
+        out.extend(encoded)
     out.extend(len(ordered).to_bytes(2, "little"))
     for label, index in ordered:
         leaf = canonical(label).encode("utf-8")[:255]
-        group = GROUPS.index(group_of(label, learned))
         out.append(index)
-        out.append(group)
+        out.append(GROUPS.index(group_of(label, learned)))
         out.append(len(leaf))
         out.extend(leaf)
     return bytes(out)

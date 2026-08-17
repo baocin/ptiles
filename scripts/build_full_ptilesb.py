@@ -14,6 +14,9 @@ import zstandard as zstd
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+
+from ptiles.flightnodes import is_flight_node
 from encoding import coord_to_micro
 from shared import write_header, HEADER_SIZE, write_index, train_dictionary
 
@@ -152,12 +155,21 @@ def load_state(st, brand_map, chain_idx):
     ]
 
     records = []
+    dropped_flights = 0
     for i in range(len(t)):
         s = src[i]
         stype = SRC_FOURSQUARE if s == "foursquare" else SRC_OVERTURE
         sname = "foursquare" if s == "foursquare" else "overture"
         sid = ids[i]
         name = names[i] or ""
+        # A departure board is not a set of places. The source data carries one
+        # around every airport -- flight numbers, gates, concourses -- and none
+        # of it is somewhere a person can be routed to. See
+        # `ptiles/flightnodes.py`; the client applies the same rule at read
+        # time so packs already downloaded are clean too.
+        if is_flight_node(name):
+            dropped_flights += 1
+            continue
         brand = ""
         if stype == SRC_OVERTURE and brand_map and sid in brand_map:
             brand = brand_map[sid]
@@ -183,6 +195,8 @@ def load_state(st, brand_map, chain_idx):
                 "chain_count": chain_count,
             }
         )
+    if dropped_flights:
+        print(f"  {st}: dropped {dropped_flights} flight/gate records")
     return records
 
 

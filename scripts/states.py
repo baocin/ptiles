@@ -113,6 +113,8 @@ NON_US: list[State] = [
     State("", "JP-KYUSHU", "Kyushu", 122.23, 20.72, 132.81, 35.1, "kyushu"),
 ]
 
+US = "US"  # the country code the 51 state scopes belong to
+
 REGIONS: list[State] = STATES + NON_US
 
 
@@ -149,6 +151,55 @@ PBF_DIRS = [
     Path("/mnt/core/timeline-ptiles-cache/2026-08-06/pbf"),
     Path("/mnt/aoi/kino/ptiles/pbfs"),
 ]
+
+
+def country_of_scope(scope: str) -> str:
+    """Country a scope belongs to, e.g. 'JP-KANTO' -> 'JP', 'TN' -> 'US'.
+
+    Delegates to ptiles.scopes so the rule has one definition. Imported lazily
+    because that package pulls in h3 and zstandard, and this module is otherwise
+    standard-library only -- the import-time collision guard above deliberately
+    keeps its own narrow check for that reason.
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).parent.parent))
+    from ptiles.scopes import country_of
+
+    return country_of(scope)
+
+
+def scopes_for_country(country: str, subdivisions: bool = False) -> list[str]:
+    """The scopes to build for one country -- a *covering* set, not every scope.
+
+    A country declares both forms when its layers need both: Japan has `JP` for
+    the layers that fit one file and `JP-KANTO`..`JP-KYUSHU` for buildings,
+    which do not. Returning all nine would build a country-wide rail file *and*
+    eight regional ones covering the same track, so a client opening Japan sees
+    every feature twice.
+
+    So: the country-wide scope alone when one is declared, or the subdivisions
+    when there is no country-wide scope. `subdivisions=True` inverts that, for a
+    builder like build_state_v8 whose layer cannot fit a single file.
+    """
+    country = country.upper()
+    whole, parts = [], []
+    for region in REGIONS:
+        try:
+            if country_of_scope(region.abbr) != country:
+                continue
+        except ValueError:
+            continue
+        (parts if "-" in region.abbr else whole).append(region.abbr)
+
+    if country == US:
+        # The US has no country-wide scope; its 51 states are the covering set.
+        return sorted(parts + whole)
+    if subdivisions:
+        return sorted(parts or whole)
+    return sorted(whole or parts)
+
 
 
 def get_state(abbr_or_fips: str) -> State | None:

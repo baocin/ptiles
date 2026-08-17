@@ -92,6 +92,43 @@ def test_the_region_table_guards_itself():
         states.NON_US.remove(bad)
 
 
+# --- which scopes a country expands to -------------------------------------
+
+
+def test_country_expands_to_a_covering_set_not_every_scope():
+    """Japan declares JP *and* 8 regions because different layers need each.
+
+    Expanding `--countries JP` to all nine would build a country-wide rail file
+    and eight regional ones covering the same track, so a client opening Japan
+    counts every feature twice. (This is not hypothetical: the first version of
+    the flag did exactly that and wrote four duplicate rail files.)
+    """
+    from states import scopes_for_country
+
+    assert scopes_for_country("JP") == ["JP"]
+    regions = scopes_for_country("JP", subdivisions=True)
+    assert regions == [
+        "JP-CHUBU", "JP-CHUGOKU", "JP-HOKKAIDO", "JP-KANSAI",
+        "JP-KANTO", "JP-KYUSHU", "JP-SHIKOKU", "JP-TOHOKU",
+    ]
+    assert "JP" not in regions
+
+
+def test_us_expands_to_its_states():
+    """The US declares no country-wide scope, so the 51 states are the set."""
+    from states import scopes_for_country
+
+    us = scopes_for_country("US")
+    assert len(us) == 51
+    assert "TN" in us and "DC" in us
+
+
+def test_unknown_country_expands_to_nothing():
+    from states import scopes_for_country
+
+    assert scopes_for_country("FR") == []
+
+
 # --- layer versions differing between countries ---------------------------
 
 

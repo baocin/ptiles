@@ -47,7 +47,7 @@ from shared import (
     write_header,
     HEADER_SIZE,
 )
-from states import STATES, get_state, pbf_path as find_pbf
+from states import STATES, get_state, pbf_path as find_pbf, scopes_for_country
 
 # data/states is where the other builders write, but it is root-owned and
 # empty on this host (its contents are published and were cleared), so the
@@ -395,6 +395,11 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--all", action="store_true")
     p.add_argument("--states")
+    p.add_argument(
+        "--countries",
+        help="Comma-separated countries, e.g. JP -- expands to every declared "
+             "scope of that country (JP plus its 8 regions)",
+    )
     args = p.parse_args()
 
     targets = []
@@ -405,6 +410,13 @@ def main():
             s = get_state(a.strip())
             if s:
                 targets.append(s.abbr)
+    elif args.countries:
+        for c in args.countries.split(","):
+            found = scopes_for_country(c.strip())
+            if found:
+                targets.extend(found)
+            else:
+                print(f"No declared scopes for country: {c.strip()}")
     else:
         p.print_help()
         return

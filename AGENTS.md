@@ -353,10 +353,13 @@ Two consequences:
 
 ### Building Japan
 
+`--countries JP` expands to the scopes that actually cover the country, so you
+never write out the region list:
+
 ```bash
 # Country-wide layers (one file each)
 uv run --with osmium --with h3 --with zstandard --with shapely \
-    python scripts/build_places.py --states JP        # also parks, rail, trails, ev
+    python scripts/build_places.py --countries JP     # also parks, rail, trails, ev
 uv run --with osmium --with h3 --with zstandard --with shapely \
     python scripts/build_water.py --source pbf --states JP
 uv run --with osmium --with h3 --with zstandard --with shapely \
@@ -368,13 +371,22 @@ uv run --with osmium --with h3 --with zstandard --with shapely \
     /mnt/core/timeline-ptiles-cache/raw/japan-latest.osm.pbf \
     /mnt/core/kino/ptiles/data/JP.roads.ptiles
 
-# Buildings: per region, memory-capped so a runaway fails fast
-for R in HOKKAIDO TOHOKU KANTO CHUBU KANSAI CHUGOKU SHIKOKU KYUSHU; do
-  systemd-run --user --scope -p MemoryMax=10G -p MemorySwapMax=0 \
+# Buildings: expands to the 8 regions, since they do not fit one file
+systemd-run --user --scope -p MemoryMax=10G -p MemorySwapMax=0 \
     uv run --with osmium --with h3 --with zstandard --with shapely \
-    python scripts/build_state_v8.py JP-$R
-done
+    python scripts/build_state_v8.py --countries JP
 ```
+
+**`--countries` returns a covering set, not every declared scope.** Japan
+declares `JP` *and* its 8 regions because different layers need each, so
+expanding to all nine would build a country-wide rail file and eight regional
+ones over the same track — every feature counted twice by a client. The rule:
+the country-wide scope when one is declared, the subdivisions when it is not.
+`build_state_v8` asks for subdivisions explicitly, because buildings at country
+scale do not fit one build.
+
+`build_water` and `build_points` still take `--states`; `--countries` is on
+places, parks, rail, trails, ev and buildings.
 
 **Memory.** Extraction holds every feature in RAM. Country-scale extracts need
 the compact representation (`array('i')` of interleaved micro-degrees, ~8 bytes

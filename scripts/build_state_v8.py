@@ -32,7 +32,13 @@ from encode_v8 import (
     parse_levels,
 )
 from encoding import coord_to_micro, micro_to_coord
-from states import STATES, get_state, state_bbox, pbf_path as find_pbf
+from states import (
+    STATES,
+    get_state,
+    state_bbox,
+    scopes_for_country,
+    pbf_path as find_pbf,
+)
 
 PBF_DIR = Path("/mnt/core/timeline-ptiles-cache/raw")
 OUTPUT_DIR = Path("/mnt/core/kino/ptiles/data/v4/states")
@@ -275,11 +281,25 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("target", nargs="?")
     p.add_argument("--all", action="store_true")
+    p.add_argument(
+        "--countries",
+        help="Comma-separated countries, e.g. JP. Buildings do not fit one file "
+             "at country scale, so this expands to the subdivisions where a "
+             "country declares them (JP -> its 8 regions).",
+    )
     args = p.parse_args()
 
     targets = []
     if args.all:
         targets = [s for s in STATES if find_pbf(s, prefer=PBF_DIR)]
+    elif args.countries:
+        for c in args.countries.split(","):
+            # subdivisions=True: 29.5M Japanese buildings will not fit a single
+            # build, so the regional scopes are the ones that can be built.
+            found = scopes_for_country(c.strip(), subdivisions=True)
+            if not found:
+                print(f"No declared scopes for country: {c.strip()}")
+            targets.extend(s for s in (get_state(a) for a in found) if s)
     elif args.target:
         s = get_state(args.target)
         if s:

@@ -15,11 +15,15 @@ packs already on disk come back clean without being rebuilt. **The two have to
 agree** -- they share the fixtures below.
 
 Measured against the published ``TN.business.ptiles`` (829,528 named records)
-this drops 1,086 names, clustering on BNA (506), MEM (380), TYS (69) and CHA
-(27), which is the evidence it catches nothing else. Proximity to an airport is
-deliberately not used: no builder emits an aeroway layer, so there is nothing
-to measure against, and 45 of the names caught are flights logged nowhere near
-one.
+the name rules drop 1,234, clustering on BNA, MEM, TYS and CHA, which is the
+evidence they catch nothing else. Proximity to an airport is deliberately not
+used: no builder emits an aeroway layer, so there is nothing to measure
+against, and 45 of the names caught are flights logged nowhere near one.
+
+The category these records belong to is
+``Travel and Transportation > Transport Hub > Airport > Plane``, confirmed
+against a categories sidecar -- but see :func:`flight_categories` for why it is
+found by detection rather than by that label.
 """
 
 from __future__ import annotations
@@ -68,12 +72,18 @@ _AIRSIDE = re.compile(
 # Class`, `Flight To Des Moines`, `First Class`, `The Brink Of Destruction`.
 # Dropping the category takes all 1,710.
 #
-# Detected rather than named, because a category's label is not knowable in
-# advance and its *index* is per-state: `build_full_ptilesb.py` numbers
-# categories by frequency rank within each state
-# (`cat_idx = {c: i + 1 for i, (c, _) in enumerate(sorted_cats[:254])}`), so
-# index 94 in Tennessee is a different category in Georgia. This is also why
-# the filter cannot run on the phone: the client sees an index, never a label.
+# Detected rather than named, for three reasons. Guessing label text goes
+# wrong ("Flight School" is a business people drive to). The index is per
+# state: `build_full_ptilesb.py` numbers categories by frequency rank within
+# each state (`cat_idx = {c: i + 1 for i, (c, _) in enumerate(sorted_cats[:254])}`).
+# And the numbering moves between builds of the *same* state -- the flight
+# category is index 94 in the published TN.business.ptiles and index 96 in a
+# TN categories sidecar built from 980,499 places rather than 829,528, with
+# nothing in either file recording which build the other came from. A consumer
+# pairing the two would label every flight an elementary school.
+#
+# It is also why the filter cannot run on the phone: the client sees an index,
+# never a label.
 FLIGHT_CATEGORY_SHARE = 0.4
 
 # Below this, a category is too small for its share to mean anything: three

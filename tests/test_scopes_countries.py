@@ -101,14 +101,25 @@ def test_manifest_fatal_on_unrecognised_name(tmp_path):
     not (SNAPSHOT / "JP.roads.ptiles").exists(), reason="Japan roads not present"
 )
 def test_manifest_reports_ptlr_without_inventing_bounds(tmp_path):
-    """PTLR carries no bbox; read_header misreads its bytes as ~1e-39 bounds."""
+    """PTLR is not the PTILES container, and read_header does not reject it --
+    it reads PTLR's bytes through the PTILES field layout, which yielded a
+    feature count of 471450137651052544 and bounds of ~1e-39 for every roads
+    file published. Bounds must be either genuinely recorded or null, never
+    that garbage.
+    """
     (tmp_path / "JP.roads.ptiles").symlink_to(SNAPSHOT / "JP.roads.ptiles")
     r = _run_manifest(tmp_path)
     assert r.returncode == 0, r.stderr
     entry = json.loads(r.stdout)["layers"]["roads"]["scopes"]["JP"]
     assert entry["format"] == "PTLR"
-    assert entry["bounds"] is None
     assert entry["features"] == 10_552_202
+
+    bounds = entry["bounds"]
+    if bounds is None:
+        return  # built before the bbox field; unknown is the honest answer
+    min_lat, min_lon, max_lat, max_lon = bounds
+    assert min_lat < max_lat and min_lon < max_lon
+    assert 20 < min_lat < 46 and 122 < min_lon < 155, "Japan, not a rounding artefact"
 
 
 # --- client ---------------------------------------------------------------

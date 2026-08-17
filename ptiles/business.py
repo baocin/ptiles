@@ -56,6 +56,9 @@ class Business:
     website: str | None = None
     address: str | None = None
     brand: str | None = None
+    # v5: the English name from Overture's names.common map. Was dropped at the
+    # extract projection, not by upstream.
+    name_en: str | None = None
     operating_status: str | None = None
     emails: tuple[str, ...] = ()
     socials: tuple[str, ...] = ()
@@ -107,6 +110,9 @@ def decode_business_record(data: bytes, offset: int) -> tuple[dict, int]:
     phone = None
     website = None
     address = None
+    # v1/v2 spend 0x10 on operating_status, so these records never carry an
+    # English name. Defined so the shared return shape holds.
+    name_en = None
     brand = None
     emails: list[str] = []
     socials: list[str] = []
@@ -153,6 +159,7 @@ def decode_business_record(data: bytes, offset: int) -> tuple[dict, int]:
         "website": website,
         "address": address,
         "brand": brand,
+        "name_en": name_en,
         "operating_status": operating_status,
         "emails": tuple(emails),
         "socials": tuple(socials),
@@ -204,6 +211,7 @@ def decode_business_record_v4(data: bytes, offset: int,
     pos += 1
 
     phone = website = address = brand = None
+    name_en = None
     chain_count = None
 
     if flags & 0x01:
@@ -217,6 +225,13 @@ def decode_business_record_v4(data: bytes, offset: int,
         pos += consumed
     if flags & 0x08:
         brand, consumed = decode_string_u8(data, pos)
+        pos += consumed
+    if flags & 0x10:
+        # v5: name:en, written after brand and before chain_count. These records
+        # carry no length prefix, so field order is the contract. A v4 file has
+        # the bit clear, so no version check is needed. Note 0x10 meant
+        # operating_status in v1/v2 -- v4 dropped that, which is what freed it.
+        name_en, consumed = decode_string_u16(data, pos)
         pos += consumed
     if flags & 0x80:
         chain_count = data[pos]
@@ -644,6 +659,7 @@ class BusinessReader(BoundaryMixin):
             website=d.get("website"),
             address=d.get("address"),
             brand=d.get("brand"),
+            name_en=d.get("name_en"),
             operating_status=d.get("operating_status", "open"),
             emails=d.get("emails", ()),
             socials=d.get("socials", ()),

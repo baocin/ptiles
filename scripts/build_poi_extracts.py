@@ -53,7 +53,10 @@ SELECT
     phones[1]                        AS phone,
     websites[1]                      AS website,
     confidence                       AS confidence,
-    brand.names.primary              AS brand_name
+    brand.names.primary              AS brand_name,
+    -- names.common is a language->value map; 'en' is the alternative name worth
+    -- carrying. It was dropped at this projection, not by upstream.
+    names.common['en']               AS name_en
 FROM read_parquet('{overture}')
 WHERE addresses[1].country = 'US'
   AND names.primary IS NOT NULL
@@ -74,7 +77,8 @@ SELECT
     tel                              AS phone,
     website                          AS website,
     CAST(NULL AS DOUBLE)             AS confidence,
-    CAST(NULL AS VARCHAR)            AS brand_name
+    CAST(NULL AS VARCHAR)            AS brand_name,
+    CAST(NULL AS VARCHAR)            AS name_en
 FROM read_parquet('{foursquare}')
 WHERE country = 'US'
   AND date_closed IS NULL
@@ -84,7 +88,7 @@ WHERE country = 'US'
 
 EXTRACT_COLUMNS = (
     "source, source_id, name, lat, lon, primary_category, "
-    "address, city, phone, website, confidence"
+    "address, city, phone, website, confidence, brand_name, name_en"
 )
 
 

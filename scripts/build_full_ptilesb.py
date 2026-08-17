@@ -18,6 +18,7 @@ from boundaries import stamp_boundary
 from states import get_state
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 
+from ptiles.dedupe import dedupe
 from ptiles.flightnodes import flight_categories, is_flight_node
 from encoding import coord_to_micro
 from shared import write_header, HEADER_SIZE, write_index, train_dictionary
@@ -28,7 +29,7 @@ import h3
 from encoding import encode_varint, encode_string_u8, encode_string_u16, zigzag_encode
 
 MAGIC = b"PTILESB\0"
-VERSION = 4  # v4: no record_len, sequential IDs, i16 cell-relative coords
+VERSION = 5  # v5 adds name:en (0x10) and carries brand in-record  # v4: no record_len, sequential IDs, i16 cell-relative coords
 H3_RES = 7
 
 SRC_FOURSQUARE = 2
@@ -129,23 +130,27 @@ def load_chain_index():
     }
 
 
+
+_BASE_COLUMNS = [
+    "source", "source_id", "name", "lat", "lon", "primary_category",
+    "address", "city", "phone", "website", "confidence",
+]
+# v5 additions. Named only when the extract actually has them: an extract built
+# before build_poi_extracts carried them through its projection has neither, and
+# naming a missing column is an error rather than a NULL.
+_OPTIONAL_COLUMNS = ["brand_name", "name_en"]
+
+
+def _columns_for(path):
+    have = set(pq.read_schema(path).names)
+    return _BASE_COLUMNS + [c for c in _OPTIONAL_COLUMNS if c in have]
+
+
 def load_state(st, brand_map, chain_idx):
     path = os.path.join(STATE_DIR, f"{st}.parquet")
     t = pq.read_table(
         path,
-        columns=[
-            "source",
-            "source_id",
-            "name",
-            "lat",
-            "lon",
-            "primary_category",
-            "address",
-            "city",
-            "phone",
-            "website",
-            "confidence",
-        ],
+        columns=_columns_for(path),
     )
     src, ids, names, lats, lons, cats = [
         t.column(c).to_pylist()
@@ -155,6 +160,11 @@ def load_state(st, brand_map, chain_idx):
         t.column(c).to_pylist()
         for c in ["address", "city", "phone", "website", "confidence"]
     ]
+    # Optional: an extract produced before the projection carried these has
+    # neither column, and the record falls back to the sidecar brand map.
+    have = set(t.column_names)
+    brands_col = t.column("brand_name").to_pylist() if "brand_name" in have else None
+    name_en_col = t.column("name_en").to_pylist() if "name_en" in have else None
 
     records = []
     for i in range(len(t)):
@@ -163,9 +173,13 @@ def load_state(st, brand_map, chain_idx):
         sname = "foursquare" if s == "foursquare" else "overture"
         sid = ids[i]
         name = names[i] or ""
-        brand = ""
-        if stype == SRC_OVERTURE and brand_map and sid in brand_map:
+        # The extract now carries brand_name and name_en directly. The sidecar
+        # brand map stays as a fallback: it is how brands reached v4 at all, and
+        # an older extract will not have the column.
+        brand = (brands_col[i] or "") if brands_col is not None else ""
+        if not brand and stype == SRC_OVERTURE and brand_map and sid in brand_map:
             brand = brand_map[sid]
+        name_en = (name_en_col[i] or "") if name_en_col is not None else ""
         chain_count = chain_idx.get(name.lower(), 0) if chain_idx else 0
         confidence = (
             round(confs[i] * 100) if confs[i] is not None and confs[i] > 0 else 0
@@ -185,6 +199,7 @@ def load_state(st, brand_map, chain_idx):
                 "city": cities[i] or "",
                 "confidence": min(confidence, 100),
                 "brand": brand,
+                "name_en": name_en,
                 "chain_count": chain_count,
             }
         )
@@ -222,6 +237,20 @@ def _without_flights(st, records):
             f"flight categories: {sorted(categories) or 'none'}",
             flush=True,
         )
+    # One place, one record. Foursquare and Overture were merged without a
+    # dedupe pass, so most real places are in here twice under slightly
+    # different spellings: `Mt Juliet Family Vision` six times, `FirstBank` and
+    # `Firstbank`, `B & E Automotive` and `B&E Automotive`. Over Tennessee this
+    # collapses 137,120 of 829,528 records -- 16.5% -- and the survivor is
+    # filled in from the ones it absorbs, so no phone or website is lost with
+    # the row. See `ptiles/dedupe.py`.
+    kept, absorbed = dedupe(kept)
+    if absorbed:
+        print(
+            f"  {st}: merged {absorbed} duplicate records "
+            f"({absorbed / (len(kept) + absorbed) * 100:.1f}%), {len(kept)} remain",
+            flush=True,
+        )
     return kept
 
 
@@ -251,6 +280,10 @@ def encode_v4(rec, uid: int, cat_idx: dict, cell_center_micro: tuple) -> bytes:
         flags |= 0x04
     if rec["brand"]:
         flags |= 0x08
+    if rec.get("name_en"):
+        # v5. Free in the v4 decoder: v1/v2 spent 0x10 on operating_status,
+        # which v4 dropped and decode_business_record_v4 never reads.
+        flags |= 0x10
     if rec["chain_count"] > 0:
         flags |= 0x80
     buf.append(flags)
@@ -263,6 +296,10 @@ def encode_v4(rec, uid: int, cat_idx: dict, cell_center_micro: tuple) -> bytes:
         buf.extend(encode_string_u16(rec["address"]))
     if rec["brand"]:
         buf.extend(encode_string_u8(rec["brand"]))
+    if rec.get("name_en"):
+        # After brand and before chain_count, matching the flag order: these
+        # records carry no length prefix, so field order is the contract.
+        buf.extend(encode_string_u16(rec["name_en"]))
     if rec["chain_count"] > 0:
         buf.append(min(rec["chain_count"], 255))
 

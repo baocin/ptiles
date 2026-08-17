@@ -18,7 +18,7 @@ from boundaries import stamp_boundary
 from states import get_state
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 
-from ptiles.categories import GROUPS, canonical, group_of
+from ptiles.categories import GROUPS, canonical, group_of, learn_groups
 from ptiles.dedupe import dedupe
 from ptiles.flightnodes import flight_categories, is_flight_node
 from encoding import coord_to_micro
@@ -397,6 +397,9 @@ def category_aux(state: str, cat_idx: dict, record_count: int) -> bytes:
     # 255 is a category like any other as far as a reader is concerned, and it
     # has to be named or the byte resolves to nothing.
     ordered = ordered + [("other", CATEGORY_OTHER)]
+    # A bare label inherits the family of the path naming the same leaf, read
+    # off this build's own vocabulary rather than remembered between builds.
+    learned = learn_groups(labels)
     stamp = build_id(state, labels, record_count).encode()
 
     out = bytearray(CATEGORY_AUX_MAGIC)
@@ -406,7 +409,7 @@ def category_aux(state: str, cat_idx: dict, record_count: int) -> bytes:
     out.extend(len(ordered).to_bytes(2, "little"))
     for label, index in ordered:
         leaf = canonical(label).encode("utf-8")[:255]
-        group = GROUPS.index(group_of(label))
+        group = GROUPS.index(group_of(label, learned))
         out.append(index)
         out.append(group)
         out.append(len(leaf))

@@ -18,23 +18,17 @@ This module is the vocabulary layer:
 - :func:`canonical` reduces either spelling to one snake_case leaf.
 - :func:`group_of` gives the coarse family a leaf belongs to, which is the
   part that is worth putting in a byte and comparing across packs.
-- :func:`stable_id` maps a canonical leaf to a number that does not move.
-
-The ids live in ``category_ids.json`` beside this file and are **append-only**:
-a label that has ever been assigned an id keeps it forever, and a new label
-takes the next free number. That is the whole point -- the builder's current
-scheme numbers categories by how common they are *within one state's build*,
-so the same number means different things in two states and, as measured,
-different things in two builds of the same state.
+There is deliberately no global id registry. An earlier version kept one --
+an append-only ``category_ids.json`` mapping every leaf to a number that never
+moved -- and it was redundant the moment each pack began carrying its own
+table: what crosses between packs is the *label* and the *group*, both of
+which travel inside the file. A second numbering would only be one more thing
+to keep in step.
 """
 
 from __future__ import annotations
 
-import json
 import re
-from pathlib import Path
-
-_TABLE = Path(__file__).with_name("category_ids.json")
 
 # The coarse families, in the source's own words. Anything whose path starts
 # with one of these belongs to it; everything else is placed by
@@ -144,22 +138,31 @@ def canonical(label: str | None) -> str:
     return _PUNCT.sub("_", leaf).strip("_")
 
 
-def _load_leaf_groups() -> dict[str, str]:
-    """Leaf to group, learned from every path this repo has seen.
+def learn_groups(labels) -> dict[str, str]:
+    """Leaf to family, read off the paths in one build's own vocabulary.
 
-    Built from the shipped table rather than hand-written, so a new Overture
-    path teaches the mapping by being encountered once.
+    A path states its family; a bare label does not. Where the same state
+    holds both spellings -- ``Landmarks and Outdoors > Park`` and ``park`` --
+    the path teaches the bare one, and nothing has to be remembered between
+    builds to do it.
     """
-    data = _read_table()
-    return {leaf: group for leaf, (_, group) in data.items()}
+    learned: dict[str, str] = {}
+    for label in labels or ():
+        if ">" not in (label or ""):
+            continue
+        root = canonical(label.split(">")[0])
+        if root in GROUPS:
+            learned[canonical(label)] = root
+    return learned
 
 
-def group_of(label: str | None) -> str:
-    """The coarse family of a category, from its path or from what is known.
+def group_of(label: str | None, learned: dict[str, str] | None = None) -> str:
+    """The coarse family of a category, from its path or from what it is.
 
-    A path says so directly. A bare label is looked up among the leaves whose
-    group a path has already established; an unknown one is ``other``, which
-    is a fact about the input rather than a category.
+    `learned` is what :func:`learn_groups` read off the paths in the same
+    build, so a bare label can inherit the family of the path that names the
+    same leaf. Anything still unplaced is ``other``, which is a fact about the
+    input rather than a category.
     """
     if not label:
         return "other"
@@ -172,52 +175,7 @@ def group_of(label: str | None) -> str:
         return leaf
     if leaf in _BARE_GROUPS:
         return _BARE_GROUPS[leaf]
-    return _load_leaf_groups().get(leaf, "other")
-
-
-def _read_table() -> dict[str, tuple[int, str]]:
-    if not _TABLE.exists():
-        return {}
-    raw = json.loads(_TABLE.read_text())
-    return {leaf: (entry["id"], entry["group"]) for leaf, entry in raw["labels"].items()}
-
-
-def stable_id(label: str | None) -> int:
-    """The id of a category, or 0 for one this repo has never seen.
-
-    0 means *unknown to the table*, not *uncategorised*: see
-    `build_full_ptilesb.py`, which keeps those apart so a truncated tail stops
-    masquerading as a record with no category at all.
-    """
-    leaf = canonical(label)
-    if not leaf:
-        return 0
-    return _read_table().get(leaf, (0, "other"))[0]
-
-
-def extend(labels) -> tuple[int, int]:
-    """Give every unseen label the next free id. Returns (added, total).
-
-    Append-only by construction: existing ids are read back and never
-    reassigned, so a rebuilt pack keeps meaning what it meant.
-    """
-    raw = json.loads(_TABLE.read_text()) if _TABLE.exists() else {"next_id": 1, "labels": {}}
-    added = 0
-    for label in labels:
-        leaf = canonical(label)
-        if not leaf or leaf in raw["labels"]:
-            # Learn the group even for a label already carrying an id: the
-            # first sighting may have been a bare word with no ancestry.
-            if leaf and raw["labels"].get(leaf, {}).get("group") == "other":
-                group = group_of(label)
-                if group != "other":
-                    raw["labels"][leaf]["group"] = group
-            continue
-        raw["labels"][leaf] = {"id": raw["next_id"], "group": group_of(label)}
-        raw["next_id"] += 1
-        added += 1
-    _TABLE.write_text(json.dumps(raw, indent=1, sort_keys=True) + "\n")
-    return added, len(raw["labels"])
+    return (learned or {}).get(leaf, "other")
 
 
 def _self_check() -> None:
@@ -235,26 +193,13 @@ def _self_check() -> None:
     assert group_of("Dining and Drinking > Restaurant") == "dining_and_drinking"
     assert group_of("something nobody has seen") == "other"
 
-    # Ids do not move once assigned.
-    before = stable_id("Landmarks and Outdoors > Park")
-    if before:
-        assert stable_id("park") == before, "both spellings share one id"
+    # A path in the same build teaches the bare spelling its family.
+    learned = learn_groups(["Landmarks and Outdoors > Park", "Retail > Grocery Store"])
+    assert group_of("park", learned) == "landmarks_and_outdoors"
+    assert group_of("park") == "other", "with nothing learned, nothing is guessed"
 
-    print(f"ok: {len(_read_table())} labels in the table")
+    print(f"ok: {len(_BARE_GROUPS)} bare labels placed by hand, groups {len(GROUPS)}")
 
 
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1 and sys.argv[1] == "--extend":
-        seen: list[str] = []
-        for path in sys.argv[2:]:
-            data = json.loads(Path(path).read_text())
-            seen.extend(data.get("categories", data))
-        # Paths first, so a leaf learns its family before a bare spelling of
-        # the same word asks for one.
-        seen.sort(key=lambda label: (">" not in label, label))
-        added, total = extend(seen)
-        print(f"added {added}, {total} labels known")
-    else:
-        _self_check()
+    _self_check()

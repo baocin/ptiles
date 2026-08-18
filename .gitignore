@@ -13,3 +13,10 @@ tiles/
 
 # Build/run logs
 logs/
+
+# Built layers. 200 MB of these, plus a 1.2 GB US.ptiles in LFS, were carried
+# in history until they were stripped out; every one is reproducible by the
+# builders in scripts/. Test fixtures live in ptile-client's conformance
+# corpus, not here, so nothing under test depends on these being present.
+data/states/
+/US.ptiles
